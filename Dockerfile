@@ -3,10 +3,12 @@ FROM --platform=linux/amd64 aecgeeks/ifcopenshell:latest
 # Switch to root to install packages
 USER root
 
-# Install pip if not already available, then install Flask dependencies
-# The base image already has Python 3.10, just need pip
-RUN apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --no-cache-dir flask flask-cors numpy
+# Install pip and Flask dependencies
+# Check if pip3 exists, if not install python3-pip
+RUN apt-get update && \
+    (command -v pip3 >/dev/null 2>&1 || apt-get install -y python3-pip) && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip3 install --no-cache-dir flask flask-cors numpy
 
 # Create the API server script
 WORKDIR /app
