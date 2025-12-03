@@ -4,10 +4,13 @@ FROM --platform=linux/amd64 aecgeeks/ifcopenshell:latest
 USER root
 
 # The base image has Python 3.8, but IfcOpenShell needs Python 3.10
-# Install Python 3.10 and its pip, then use it for everything
+# Add deadsnakes PPA to get Python 3.10 packages for Ubuntu 20.04
 RUN apt-get update && \
-    apt-get install -y python3.10 python3.10-venv python3.10-dev && \
-    python3.10 -m ensurepip --upgrade && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && \
+    apt-get install -y python3.10 python3.10-distutils && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     python3.10 -m pip install --no-cache-dir flask flask-cors numpy && \
     rm -rf /var/lib/apt/lists/*
 
