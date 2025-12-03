@@ -5,11 +5,12 @@ USER root
 
 # The base image has Python 3.8, but IfcOpenShell needs Python 3.10
 # Add deadsnakes PPA to get Python 3.10 packages for Ubuntu 20.04
-RUN apt-get update && \
-    apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
-    apt-get update && \
-    apt-get install -y python3.10 python3.10-distutils && \
+# Use DEBIAN_FRONTEND=noninteractive to avoid interactive prompts
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common curl && \
+    DEBIAN_FRONTEND=noninteractive add-apt-repository ppa:deadsnakes/ppa -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3.10 python3.10-distutils && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     python3.10 -m pip install --no-cache-dir flask flask-cors numpy && \
     rm -rf /var/lib/apt/lists/*
