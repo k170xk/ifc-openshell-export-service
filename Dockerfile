@@ -1,7 +1,11 @@
 FROM --platform=linux/amd64 aecgeeks/ifcopenshell:latest
 
-# Install Flask for the API server
-RUN pip install flask flask-cors numpy
+# Switch to root to install packages
+USER root
+
+# Install pip and then Flask, CORS, and NumPy
+RUN apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir flask flask-cors numpy
 
 # Create the API server script
 WORKDIR /app
@@ -13,5 +17,5 @@ COPY scripts/ ./scripts/
 # Expose port (Render will set PORT env var)
 ENV PORT=5001
 
-CMD ["python", "server.py"]
+CMD ["python3", "server.py"]
 
