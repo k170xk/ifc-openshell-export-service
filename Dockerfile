@@ -21,7 +21,6 @@ COPY scripts/ ./scripts/
 # Expose port (Render will set PORT env var)
 ENV PORT=5001
 
-# Use python3.10 if available, otherwise python3
-# But we need to ensure we're using the Python that matches IfcOpenShell
-CMD ["sh", "-c", "if command -v python3.10 >/dev/null 2>&1; then python3.10 server.py; else python3 server.py; fi"]
+# Use python3.10 explicitly to match IfcOpenShell
+CMD ["python3.10", "server.py"]
 
