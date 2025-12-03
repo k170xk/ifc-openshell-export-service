@@ -10,7 +10,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common curl && \
     DEBIAN_FRONTEND=noninteractive add-apt-repository ppa:deadsnakes/ppa -y && \
     DEBIAN_FRONTEND=noninteractive apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3.10 python3.10-minimal && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3.10 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     python3.10 -m pip install --no-cache-dir flask flask-cors numpy && \
     rm -rf /var/lib/apt/lists/*
