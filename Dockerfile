@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir \
     flask \
     flask-cors \
     numpy \
-    ifcopenshell
+    ifcopenshell \
+    gunicorn
 
 # Create the API server script
 WORKDIR /app
@@ -28,5 +29,6 @@ COPY scripts/ ./scripts/
 # Expose port (Render will set PORT env var)
 ENV PORT=5001
 
-# Use python3 (Python 3.10 is the default in python:3.10-slim)
-CMD ["python3", "server.py"]
+# Use gunicorn for production WSGI server
+# Gunicorn will automatically use the PORT environment variable
+CMD exec gunicorn --bind 0.0.0.0:${PORT:-5001} --workers 2 --threads 2 --timeout 120 --access-logfile - --error-logfile - server:app
