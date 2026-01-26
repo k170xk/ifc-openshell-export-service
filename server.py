@@ -372,6 +372,15 @@ def export_chambers():
             "progress": 95
         })
         
+        # Mark as preparing download
+        update_progress(export_id, {
+            "type": "progress",
+            "message": "Preparing download...",
+            "progress": 98,
+            "current": total_items,
+            "total": total_items
+        })
+        
         # Return IFC file
         response = send_file(
             temp_path,
@@ -382,10 +391,10 @@ def export_chambers():
         # Add custom header to response
         response.headers["X-Export-Id"] = export_id
         
-        # Mark as complete
+        # Mark as complete (download will start shortly)
         update_progress(export_id, {
             "type": "complete",
-            "message": "Export complete!",
+            "message": "Download starting...",
             "progress": 100,
             "current": total_items,
             "total": total_items
