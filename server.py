@@ -16,6 +16,7 @@ spec.loader.exec_module(export_ifc_module)
 export_dwg_lines_to_ifc = export_ifc_module.export_dwg_lines_to_ifc
 create_blank_ifc_at_origin = export_ifc_module.create_blank_ifc_at_origin
 export_chambers_to_ifc = export_ifc_module.export_chambers_to_ifc
+add_light_connection_to_ifc = export_ifc_module.add_light_connection_to_ifc
 
 app = Flask(__name__)
 CORS(app)
@@ -186,7 +187,7 @@ def create_blank_ifc():
 
 @app.route("/api/export-chambers", methods=["POST"])
 def export_chambers():
-    """Export chambers, pipes, cable trays, and hangers to IFC file.
+    """Export chambers, pipes, cable trays, hangers, public lights, light connections, and roads to IFC file.
     
     Expected JSON payload:
     {
@@ -194,6 +195,9 @@ def export_chambers():
         "pipes": [...],
         "cableTrays": [...],
         "hangers": [...],
+        "publicLights": [...],
+        "lightConnections": [...],
+        "roads": [...],
         "project": {
             "name": "Project Name",
             "origin": {"x": 0, "y": 0, "z": 0},
@@ -215,16 +219,35 @@ def export_chambers():
         pipes = data.get("pipes", [])
         cable_trays = data.get("cableTrays", [])
         hangers = data.get("hangers", [])
+        public_lights = data.get("publicLights", [])
+        light_connections = data.get("lightConnections", [])
+        roads = data.get("roads", [])
         project = data.get("project", {})
+        coordinate_mode = data.get("coordinateMode", "absolute")
         
-        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers")
+        print("=" * 70)
+        print(f"[API] Export request received")
+        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads")
+        print("=" * 70)
+        sys.stdout.flush()  # Ensure logs appear immediately
         
         # Create temporary file for IFC output
         temp_fd, temp_path = tempfile.mkstemp(suffix=".ifc")
         os.close(temp_fd)
         
         # Export to IFC
-        result = export_chambers_to_ifc(chambers, temp_path, project, pipes, cable_trays, hangers)
+        result = export_chambers_to_ifc(
+            chambers,
+            temp_path,
+            project,
+            pipes,
+            cable_trays,
+            hangers,
+            public_lights_data=public_lights,
+            light_connections_data=light_connections,
+            roads_data=roads,
+            coordinate_mode=coordinate_mode,
+        )
         
         if not result.get("success"):
             # Clean up on error
