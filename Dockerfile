@@ -2,15 +2,12 @@
 # This avoids Python version conflicts
 FROM --platform=linux/amd64 python:3.10-slim
 
-# Install system dependencies that IfcOpenShell might need
-# Note: libgl1-mesa-glx is deprecated, use libgl1 and libglx-mesa0 instead
-# For server-side operations, OpenGL may not be needed, but we'll include minimal deps
+# Install minimal system dependencies
+# Note: For server-side IFC processing, OpenGL is typically not needed
+# Only install build-essential if IfcOpenShell needs to compile extensions
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
-        libgl1 \
-        libglx-mesa0 \
-        libglib2.0-0 \
         && \
     rm -rf /var/lib/apt/lists/*
 
