@@ -4961,6 +4961,7 @@ def export_chambers_to_ifc(
     light_connections_data=None,
     roads_data=None,
     coordinate_mode="absolute",
+    progress_callback=None,
 ):
     """
     Export chambers, pipes, roads, public lights, and light connections to IFC file
@@ -4982,6 +4983,7 @@ def export_chambers_to_ifc(
         public_light_count = len(public_lights_data) if public_lights_data else 0
         light_connection_count = len(light_connections_data) if light_connections_data else 0
         road_count = len(roads_data) if roads_data else 0
+        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count
         print(
             f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, and {road_count} roads"
         )
@@ -5000,8 +5002,12 @@ def export_chambers_to_ifc(
             project_coords,
             coordinate_mode=coordinate_mode,
         )
+        
+        if progress_callback:
+            progress_callback("create_file", 0, total_items, "IFC file created")
 
         # Export chambers
+        current_item = 0
         for index, chamber in enumerate(chambers_data, start=1):
             print(
                 f"[EXPORT] Adding chamber {index}/{chamber_count}: {chamber.get('name', chamber.get('id'))}"
@@ -5015,6 +5021,9 @@ def export_chambers_to_ifc(
                 coordinate_mode=coordinate_mode,
                 origin_tuple=origin_tuple,
             )
+            current_item += 1
+            if progress_callback:
+                progress_callback("chambers", current_item, total_items, f"Added chamber {index}/{chamber_count}")
 
         # Export pipes
         pipes_created = 0
@@ -5042,6 +5051,9 @@ def export_chambers_to_ifc(
                         straight_count += 1
                 else:
                     pipes_skipped += 1
+                current_item += 1
+                if progress_callback:
+                    progress_callback("pipes", current_item, total_items, f"Added pipe {index}/{pipe_count}")
             
             print(f"\n[EXPORT] ═══ PIPE SUMMARY ═══")
             print(f"[EXPORT] Total pipes requested: {pipe_count}")
@@ -5065,6 +5077,9 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                 )
+                current_item += 1
+                if progress_callback:
+                    progress_callback("cable_trays", current_item, total_items, f"Added cable tray {index}/{tray_count}")
 
         # Export hangers
         if hangers_data:
@@ -5081,6 +5096,9 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                 )
+                current_item += 1
+                if progress_callback:
+                    progress_callback("hangers", current_item, total_items, f"Added hanger {index}/{hanger_count}")
 
         # Export public lights and signs (poles, fixtures, baseplates, foundations, sign plates)
         public_lights_created = 0
@@ -5107,6 +5125,9 @@ def export_chambers_to_ifc(
                         signs_created += 1
                     else:
                         public_lights_created += 1
+                current_item += 1
+                if progress_callback:
+                    progress_callback("public_lights", current_item, total_items, f"Added public {type_label} {index}/{public_light_count}")
             
             print(f"\n[EXPORT] ═══ PUBLIC LIGHT/SIGN SUMMARY ═══")
             print(f"[EXPORT] Total elements requested: {public_light_count}")
@@ -5132,6 +5153,9 @@ def export_chambers_to_ifc(
                 )
                 if result:
                     light_connections_created += 1
+                current_item += 1
+                if progress_callback:
+                    progress_callback("light_connections", current_item, total_items, f"Added light connection {index}/{light_connection_count}")
             
             print(f"\n[EXPORT] ═══ LIGHT CONNECTION SUMMARY ═══")
             print(f"[EXPORT] Total light connections requested: {light_connection_count}")
@@ -5158,6 +5182,9 @@ def export_chambers_to_ifc(
                 if result:
                     roads_created += 1
                     road_components_created += len(result)
+                current_item += 1
+                if progress_callback:
+                    progress_callback("roads", current_item, total_items, f"Added road {index}/{road_count}")
             
             print(f"\n[EXPORT] ═══ ROAD SUMMARY ═══")
             print(f"[EXPORT] Total roads requested: {road_count}")
@@ -5165,8 +5192,12 @@ def export_chambers_to_ifc(
             print(f"[EXPORT] Road components created: {road_components_created}")
             print(f"[EXPORT] ═════════════════════\n")
 
+        if progress_callback:
+            progress_callback("writing", current_item, total_items, "Writing IFC file...")
         print(f"[EXPORT] Writing IFC to {output_path}")
         ifc_file.write(output_path)
+        if progress_callback:
+            progress_callback("complete", total_items, total_items, "Export complete!")
         print("[EXPORT] ✅ Export complete!")
 
         return {
