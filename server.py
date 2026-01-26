@@ -377,9 +377,10 @@ def export_chambers():
             temp_path,
             mimetype="application/x-step",
             as_attachment=True,
-            download_name="export.ifc",
-            headers={"X-Export-Id": export_id}  # Include export ID in response
+            download_name="export.ifc"
         )
+        # Add custom header to response
+        response.headers["X-Export-Id"] = export_id
         
         # Mark as complete
         update_progress(export_id, {
