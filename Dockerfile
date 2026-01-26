@@ -38,8 +38,31 @@ COPY scripts/ ./scripts/
 # Expose port (Render will set PORT env var)
 ENV PORT=5001
 
-# Use a wrapper script to find and use the correct Python
-RUN echo '#!/bin/bash\nPYTHON=$(which python3.10 2>/dev/null || find /usr -name python3.10 2>/dev/null | head -1 || which python3)\nexec $PYTHON server.py' > /app/start.sh && \
-    chmod +x /app/start.sh
+# Create a wrapper script to find and use Python 3.10
+RUN cat > /app/start.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Try to find Python 3.10
+PYTHON310=""
+if command -v python3.10 >/dev/null 2>&1; then
+    PYTHON310=$(command -v python3.10)
+elif [ -f /usr/bin/python3.10 ]; then
+    PYTHON310=/usr/bin/python3.10
+else
+    PYTHON310=$(find /usr -name python3.10 -type f 2>/dev/null | head -1)
+fi
+
+if [ -n "$PYTHON310" ] && [ -x "$PYTHON310" ]; then
+    echo "Using Python 3.10 at: $PYTHON310"
+    exec "$PYTHON310" /app/server.py
+else
+    echo "ERROR: Python 3.10 not found! IfcOpenShell requires Python 3.10."
+    echo "Available Python versions:"
+    ls -la /usr/bin/python* 2>/dev/null || true
+    exit 1
+fi
+EOF
+RUN chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
