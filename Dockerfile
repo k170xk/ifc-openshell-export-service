@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends software-properties-common curl && \
     add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
-    apt-get install -y --no-install-recommends python3.10 && \
+    apt-get install -y --no-install-recommends python3.10 python3.10-dev && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     rm -rf /var/lib/apt/lists/*
 
