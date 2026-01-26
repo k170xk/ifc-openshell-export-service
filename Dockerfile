@@ -6,10 +6,10 @@ USER root
 # IfcOpenShell in base image is built for Python 3.10, but base only has Python 3.8
 # Install Python 3.10 and pip for Python 3.10
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends software-properties-common && \
+    apt-get install -y --no-install-recommends software-properties-common curl && \
     add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
-    apt-get install -y --no-install-recommends python3.10 python3.10-distutils && \
+    apt-get install -y --no-install-recommends python3.10 python3.10-venv && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     rm -rf /var/lib/apt/lists/*
 
