@@ -1,21 +1,8 @@
 FROM --platform=linux/amd64 aecgeeks/ifcopenshell:latest
 
-# Switch to root to install packages  
-USER root
-
-# The base image has Python 3.8, but IfcOpenShell needs Python 3.10
-# Add deadsnakes PPA to get Python 3.10 packages for Ubuntu 20.04
-# Configure dpkg to ignore errors for GUI packages we don't need
-RUN echo '#!/bin/sh\nexit 0' > /usr/sbin/policy-rc.d && \
-    DEBIAN_FRONTEND=noninteractive apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common curl && \
-    DEBIAN_FRONTEND=noninteractive add-apt-repository ppa:deadsnakes/ppa -y && \
-    DEBIAN_FRONTEND=noninteractive apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3.10 2>&1 | grep -v "libfprint\|fprintd\|libpam-fprintd" || true && \
-    dpkg --configure -a || true && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
-    python3.10 -m pip install --no-cache-dir flask flask-cors numpy && \
-    rm -rf /var/lib/apt/lists/*
+# Install Flask for the API server
+# The base image already has Python and pip installed
+RUN pip install flask flask-cors numpy
 
 # Create the API server script
 WORKDIR /app
@@ -27,5 +14,5 @@ COPY scripts/ ./scripts/
 # Expose port (Render will set PORT env var)
 ENV PORT=5001
 
-# Use python3.10 explicitly to match IfcOpenShell
-CMD ["python3.10", "server.py"]
+# Use python (base image should have Python available)
+CMD ["python", "server.py"]
