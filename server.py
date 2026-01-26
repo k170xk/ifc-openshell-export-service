@@ -205,8 +205,15 @@ def get_export_progress(export_id):
     """Server-Sent Events endpoint for export progress"""
     def generate():
         last_timestamp = 0
+        start_time = time.time()
+        timeout = 300  # 5 minute timeout
         try:
             while True:
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Progress timeout - export may have failed'})}\n\n"
+                    break
+                
                 with export_lock:
                     progress = export_progress.get(export_id)
                 
@@ -219,6 +226,10 @@ def get_export_progress(export_id):
                         # Stop if complete or error
                         if progress.get("type") in ("complete", "error"):
                             break
+                else:
+                    # Send initial message if no progress yet
+                    if last_timestamp == 0:
+                        yield f"data: {json.dumps({'type': 'start', 'message': 'Waiting for export to start...', 'progress': 0})}\n\n"
                 
                 time.sleep(0.5)  # Poll every 500ms
         except GeneratorExit:
