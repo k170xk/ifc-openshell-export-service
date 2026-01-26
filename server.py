@@ -205,30 +205,42 @@ def get_export_progress(export_id):
     """Server-Sent Events endpoint for export progress"""
     def generate():
         last_timestamp = 0
-        while True:
-            with export_lock:
-                progress = export_progress.get(export_id)
-            
-            if progress:
-                # Only send if updated
-                if progress.get("timestamp", 0) > last_timestamp:
-                    last_timestamp = progress.get("timestamp", 0)
-                    yield f"data: {json.dumps(progress)}\n\n"
-                    
-                    # Stop if complete or error
-                    if progress.get("type") in ("complete", "error"):
-                        break
-            
-            time.sleep(0.5)  # Poll every 500ms
+        try:
+            while True:
+                with export_lock:
+                    progress = export_progress.get(export_id)
+                
+                if progress:
+                    # Only send if updated
+                    if progress.get("timestamp", 0) > last_timestamp:
+                        last_timestamp = progress.get("timestamp", 0)
+                        yield f"data: {json.dumps(progress)}\n\n"
+                        
+                        # Stop if complete or error
+                        if progress.get("type") in ("complete", "error"):
+                            break
+                
+                time.sleep(0.5)  # Poll every 500ms
+        except GeneratorExit:
+            # Client disconnected, clean up
+            pass
+        except Exception as e:
+            print(f"[API] Error in SSE generator: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
-    return Response(
+    response = Response(
         stream_with_context(generate()),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no'
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Cache-Control'
         }
     )
+    return response
 
 @app.route("/api/export-chambers", methods=["POST"])
 def export_chambers():
