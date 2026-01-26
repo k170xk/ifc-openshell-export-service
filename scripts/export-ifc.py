@@ -1894,6 +1894,7 @@ def add_road_to_ifc(
     project_coords=None,
     coordinate_mode="absolute",
     origin_tuple=None,
+    progress_callback=None,
 ):
     """Add a road to the IFC file with all its components (carriageway, kerbs, footpaths, etc.).
     
@@ -1942,6 +1943,7 @@ def add_road_to_ifc(
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     
     created_elements = []
+    total_components = len(components)
     
     for comp_idx, component in enumerate(components):
         comp_type = component.get("type", "unknown")
@@ -1954,7 +1956,11 @@ def add_road_to_ifc(
         if comp_side:
             element_name += f"_{comp_side}"
         
-        print(f"[ROAD]   Component {comp_idx + 1}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
+        print(f"[ROAD]   Component {comp_idx + 1}/{total_components}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
+        
+        # Update progress every 10 components or at key milestones
+        if progress_callback and (comp_idx % 10 == 0 or comp_idx == total_components - 1):
+            progress_callback(comp_idx + 1, total_components, f"Processing component {comp_idx + 1}/{total_components}: {comp_type}")
         
         if comp_type == "carriageway":
             # Carriageway is a triangulated mesh
@@ -5170,6 +5176,27 @@ def export_chambers_to_ifc(
                 print(
                     f"[EXPORT] Adding road {index}/{road_count}: {road.get('name', road.get('roadId', 'Road'))}"
                 )
+                # Create a component-level progress callback for this road
+                road_components = road.get("components", [])
+                road_component_count = len(road_components)
+                road_start_item = current_item
+                
+                def road_progress_callback(comp_idx, comp_total, comp_message):
+                    """Progress callback for individual road components"""
+                    nonlocal current_item
+                    # Update current_item based on component progress within this road
+                    # Distribute the road's "weight" (1 item) across its components
+                    component_progress = (comp_idx / comp_total) if comp_total > 0 else 0
+                    # current_item stays at road_start_item until road is complete
+                    # But we can show component-level progress in the message
+                    if progress_callback:
+                        progress_callback(
+                            "roads", 
+                            road_start_item,  # Still at start of this road
+                            total_items, 
+                            f"Road {index}/{road_count}: {comp_message} ({comp_idx}/{comp_total} components)"
+                        )
+                
                 result = add_road_to_ifc(
                     ifc_file,
                     storey,
@@ -5178,13 +5205,14 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
+                    progress_callback=road_progress_callback if progress_callback else None,
                 )
                 if result:
                     roads_created += 1
                     road_components_created += len(result)
                 current_item += 1
                 if progress_callback:
-                    progress_callback("roads", current_item, total_items, f"Added road {index}/{road_count}")
+                    progress_callback("roads", current_item, total_items, f"Completed road {index}/{road_count} ({road_component_count} components)")
             
             print(f"\n[EXPORT] ═══ ROAD SUMMARY ═══")
             print(f"[EXPORT] Total roads requested: {road_count}")
