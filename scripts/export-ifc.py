@@ -2009,8 +2009,10 @@ def add_road_to_ifc(
             element_name += f"_{comp_side}"
         if component.get("wideningGroupId"):
             element_name += f"_{component.get('wideningGroupId')}"
-        if component.get("sourceType") and comp_type == "widening":
+        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening"):
             element_name += f"_{component.get('sourceType')}"
+        if component.get("featureId"):
+            element_name += f"_{component.get('featureId')}"
         
         print(f"[ROAD]   Component {comp_idx + 1}/{total_components}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
         
