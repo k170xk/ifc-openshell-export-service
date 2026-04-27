@@ -101,6 +101,57 @@ def apply_color_to_element(ifc_file, element, color_hex):
                 )
 
 
+def create_ifc_simple_value(ifc_file, value):
+    """Create a simple IFC value wrapper for custom property sets."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return ifc_file.createIfcBoolean(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return ifc_file.createIfcInteger(value)
+    if isinstance(value, float):
+        return ifc_file.createIfcReal(value)
+    if isinstance(value, (list, tuple)):
+        return ifc_file.createIfcLabel(", ".join(str(v) for v in value))
+    return ifc_file.createIfcLabel(str(value))
+
+
+def add_custom_property_set(ifc_file, element, pset_name, properties):
+    """Attach a compact custom property set to an IFC element."""
+    pset_properties = []
+    for name, value in (properties or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)) and len(value) == 0:
+            continue
+        wrapped = create_ifc_simple_value(ifc_file, value)
+        if wrapped is None:
+            continue
+        pset_properties.append(
+            ifc_file.createIfcPropertySingleValue(str(name), None, wrapped, None)
+        )
+
+    if not pset_properties:
+        return None
+
+    pset = ifc_file.createIfcPropertySet(
+        ifcopenshell.guid.new(),
+        None,
+        pset_name,
+        None,
+        pset_properties,
+    )
+    ifc_file.createIfcRelDefinesByProperties(
+        ifcopenshell.guid.new(),
+        None,
+        None,
+        None,
+        [element],
+        pset,
+    )
+    return pset
+
+
 def determine_length_unit_settings(project_coords):
     unit_label = (project_coords or {}).get("unit", "meters")
     return UNIT_MAPPING.get(str(unit_label).lower(), UNIT_MAPPING["meters"])
@@ -1929,6 +1980,7 @@ def add_road_to_ifc(
     road_id = road_data.get("roadId", "Road")
     road_name = road_data.get("name", road_id)
     components = road_data.get("components", [])
+    widening_groups = road_data.get("wideningGroups", [])
     
     print(f"\n[ROAD] Adding road: {road_name}")
     print(f"[ROAD]   Components: {len(components)}")
@@ -1955,6 +2007,10 @@ def add_road_to_ifc(
         element_name = f"{road_name}_{comp_type}"
         if comp_side:
             element_name += f"_{comp_side}"
+        if component.get("wideningGroupId"):
+            element_name += f"_{component.get('wideningGroupId')}"
+        if component.get("sourceType") and comp_type == "widening":
+            element_name += f"_{component.get('sourceType')}"
         
         print(f"[ROAD]   Component {comp_idx + 1}/{total_components}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
         
@@ -1982,8 +2038,8 @@ def add_road_to_ifc(
             if element:
                 created_elements.append(element)
                 
-        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom"):
-            # Offset features are exported as triangulated meshes (like carriageway)
+        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening"):
+            # Offset features and widening fold strips are exported as triangulated meshes.
             # They preserve exact geometry including crossfalls, profiles, and layers
             vertices = component.get("vertices", [])
             indices = component.get("indices", [])
@@ -2005,6 +2061,55 @@ def add_road_to_ifc(
                     print(f"[ROAD]   ⚠️ Failed to create {comp_type} element: {element_name}")
         else:
             print(f"[ROAD]   ⚠️ Unknown component type: {comp_type}")
+
+    if widening_groups:
+        print(f"[ROAD]   Adding {len(widening_groups)} widening group metadata records")
+        for widening_group in widening_groups:
+            group_id = widening_group.get("groupId")
+            if not group_id:
+                continue
+            group_name = f"{road_name}_widening_{group_id}"
+            try:
+                proxy = ifc_run(
+                    "root.create_entity",
+                    file=ifc_file,
+                    ifc_class="IfcBuildingElementProxy",
+                    name=group_name,
+                    predefined_type="USERDEFINED",
+                )
+                placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
+                proxy.ObjectPlacement = ifc_file.createIfcLocalPlacement(
+                    None,
+                    ifc_file.createIfcAxis2Placement3D(
+                        placement_point,
+                        ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
+                        ifc_file.createIfcDirection((1.0, 0.0, 0.0)),
+                    )
+                )
+                ifc_run(
+                    "spatial.assign_container",
+                    file=ifc_file,
+                    products=[proxy],
+                    relating_structure=storey,
+                )
+                add_custom_property_set(ifc_file, proxy, "Pset_InfraGridWideningGroup", {
+                    "RoadId": road_id,
+                    "GroupId": group_id,
+                    "Side": widening_group.get("side"),
+                    "Preset": widening_group.get("preset"),
+                    "StartChainage": widening_group.get("startChainage"),
+                    "EndChainage": widening_group.get("endChainage"),
+                    "MaxOffset": widening_group.get("maxOffset"),
+                    "WideningCrossfall": widening_group.get("wideningCrossfall"),
+                    "FoldKerbHeight": widening_group.get("foldKerbHeight"),
+                    "SurfaceFinish": widening_group.get("surfaceFinish"),
+                    "HighQualityGeometry": widening_group.get("highQualityGeometry"),
+                    "PointIds": widening_group.get("pointIds", []),
+                })
+                created_elements.append(proxy)
+                print(f"[ROAD]   ✅ Created widening metadata element: {group_name}")
+            except Exception as e:
+                print(f"[ROAD]   ⚠️ Failed to create widening metadata element {group_name}: {e}")
     
     print(f"[ROAD]   ✅ Road created with {len(created_elements)} elements")
     
@@ -2095,7 +2200,7 @@ def create_road_mesh_element(
     if comp_type == "carriageway":
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
-    elif comp_type in ("footpath", "verge", "swale", "ditch"):
+    elif comp_type in ("footpath", "verge", "swale", "ditch", "widening"):
         # All surface features use IfcSlab with PAVING for consistent visibility
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
@@ -2169,6 +2274,20 @@ def create_road_mesh_element(
             print(f"[ROAD]     ✅ Applied color: {color_hex}")
         except Exception as e:
             print(f"[ROAD]     ⚠️ WARNING: Could not apply color: {e}")
+
+    try:
+        add_custom_property_set(ifc_file, road_element, "Pset_InfraGridRoadComponent", {
+            "ComponentType": comp_type,
+            "SourceType": component.get("sourceType"),
+            "Side": component.get("side"),
+            "FeatureId": component.get("featureId"),
+            "FeatureType": component.get("featureType"),
+            "WideningGroupId": component.get("wideningGroupId"),
+            "WideningPreset": component.get("wideningPreset"),
+            "RelatedWideningGroupIds": component.get("relatedWideningGroupIds", []),
+        })
+    except Exception as e:
+        print(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
     
     print(f"[ROAD]     ✅ Successfully created {comp_type} element: {element_name}")
     return road_element
