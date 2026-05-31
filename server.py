@@ -255,7 +255,7 @@ def get_export_progress(export_id):
 
 @app.route("/api/export-chambers", methods=["POST"])
 def export_chambers():
-    """Export chambers, pipes, cable trays, hangers, public lights, light connections, and roads to IFC file.
+    """Export chambers, pipes, cable trays, hangers, public lights, light connections, roads, and hardstandings to IFC file.
     
     Expected JSON payload:
     {
@@ -267,6 +267,7 @@ def export_chambers():
         "publicLights": [...],
         "lightConnections": [...],
         "roads": [...],
+        "hardstandings": [...],
         "project": {
             "name": "Project Name",
             "origin": {"x": 0, "y": 0, "z": 0},
@@ -295,10 +296,11 @@ def export_chambers():
         public_lights = data.get("publicLights", [])
         light_connections = data.get("lightConnections", [])
         roads = data.get("roads", [])
+        hardstandings = data.get("hardstandings", [])
         project = data.get("project", {})
         coordinate_mode = data.get("coordinateMode", "absolute")
         
-        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads)
+        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings)
         
         # Initialize progress
         update_progress(export_id, {
@@ -311,7 +313,7 @@ def export_chambers():
         
         print("=" * 70)
         print(f"[API] Export request received (ID: {export_id})")
-        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads")
+        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings")
         print("=" * 70)
         sys.stdout.flush()
         
@@ -351,6 +353,7 @@ def export_chambers():
             public_lights_data=public_lights,
             light_connections_data=light_connections,
             roads_data=roads,
+            hardstandings_data=hardstandings,
             coordinate_mode=coordinate_mode,
             progress_callback=progress_callback,
         )

@@ -2202,7 +2202,7 @@ def create_road_mesh_element(
     if comp_type == "carriageway":
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
-    elif comp_type in ("footpath", "verge", "swale", "ditch", "widening"):
+    elif comp_type in ("footpath", "verge", "swale", "ditch", "widening", "hardstanding"):
         # All surface features use IfcSlab with PAVING for consistent visibility
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
@@ -3307,16 +3307,270 @@ def add_light_connection_to_ifc(
         radius   # Radius
     )
     
-    # Create extruded segments between consecutive points
+    def create_circular_arc_points(start_pt, end_pt, center_pt, num_segments=64):
+        """Create points along a circular arc for a 90-degree filleted bend.
+        
+        Args:
+            start_pt: Point where arc starts (tuple)
+            end_pt: Point where arc ends (tuple)
+            center_pt: Center of the arc (corner point)
+            num_segments: Number of segments to approximate the arc
+        
+        Returns:
+            List of points along the arc
+        """
+        # Calculate vectors from center to start and end
+        v1 = (start_pt[0] - center_pt[0], start_pt[1] - center_pt[1], start_pt[2] - center_pt[2])
+        v2 = (end_pt[0] - center_pt[0], end_pt[1] - center_pt[1], end_pt[2] - center_pt[2])
+        
+        # Calculate radius (should be same for both)
+        r1 = math.sqrt(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2])
+        r2 = math.sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2])
+        radius = (r1 + r2) / 2
+        
+        if radius < 0.001:
+            return [start_pt, end_pt]
+        
+        # Normalize vectors
+        v1_norm = (v1[0]/r1, v1[1]/r1, v1[2]/r1) if r1 > 0.001 else (0, 0, 0)
+        v2_norm = (v2[0]/r2, v2[1]/r2, v2[2]/r2) if r2 > 0.001 else (0, 0, 0)
+        
+        # Calculate angle between vectors (should be ~90 degrees for filleted bends)
+        dot = v1_norm[0]*v2_norm[0] + v1_norm[1]*v2_norm[1] + v1_norm[2]*v2_norm[2]
+        angle = math.acos(max(-1.0, min(1.0, dot)))
+        
+        # Create perpendicular vector for arc plane
+        cross = (
+            v1_norm[1]*v2_norm[2] - v1_norm[2]*v2_norm[1],
+            v1_norm[2]*v2_norm[0] - v1_norm[0]*v2_norm[2],
+            v1_norm[0]*v2_norm[1] - v1_norm[1]*v2_norm[0]
+        )
+        cross_len = math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2])
+        if cross_len < 0.001:
+            # Vectors are parallel, use fallback
+            return [start_pt, end_pt]
+        cross_norm = (cross[0]/cross_len, cross[1]/cross_len, cross[2]/cross_len)
+        
+        # Sample points along the arc
+        arc_points = [start_pt]
+        for i in range(1, num_segments):
+            t = i / num_segments
+            # Interpolate angle
+            current_angle = angle * t
+            
+            # Rotate v1_norm around cross_norm by current_angle
+            # Using Rodrigues' rotation formula
+            cos_a = math.cos(current_angle)
+            sin_a = math.sin(current_angle)
+            
+            rotated = (
+                v1_norm[0]*cos_a + 
+                (cross_norm[1]*v1_norm[2] - cross_norm[2]*v1_norm[1])*sin_a +
+                cross_norm[0]*(cross_norm[0]*v1_norm[0] + cross_norm[1]*v1_norm[1] + cross_norm[2]*v1_norm[2])*(1-cos_a),
+                v1_norm[1]*cos_a + 
+                (cross_norm[2]*v1_norm[0] - cross_norm[0]*v1_norm[2])*sin_a +
+                cross_norm[1]*(cross_norm[0]*v1_norm[0] + cross_norm[1]*v1_norm[1] + cross_norm[2]*v1_norm[2])*(1-cos_a),
+                v1_norm[2]*cos_a + 
+                (cross_norm[0]*v1_norm[1] - cross_norm[1]*v1_norm[0])*sin_a +
+                cross_norm[2]*(cross_norm[0]*v1_norm[0] + cross_norm[1]*v1_norm[1] + cross_norm[2]*v1_norm[2])*(1-cos_a)
+            )
+            
+            # Scale by radius and add center
+            arc_pt = (
+                center_pt[0] + rotated[0] * radius,
+                center_pt[1] + rotated[1] * radius,
+                center_pt[2] + rotated[2] * radius
+            )
+            arc_points.append(arc_pt)
+        
+        arc_points.append(end_pt)
+        return arc_points
+    
+    def sample_path_with_catmull_rom(points, num_segments=512):
+        """Sample path using Catmull-Rom spline interpolation (same as Three.js uses).
+        
+        This creates smooth curves through the control points, matching what the 3D viewer shows.
+        The control points define the curve shape, and we interpolate smoothly between them.
+        """
+        if len(points) < 2:
+            return points
+        if len(points) == 2:
+            # Just two points - linear interpolation with many samples
+            sampled = [points[0]]
+            for i in range(1, num_segments + 1):
+                t = i / (num_segments + 1)
+                pt = (
+                    points[0][0] + (points[1][0] - points[0][0]) * t,
+                    points[0][1] + (points[1][1] - points[0][1]) * t,
+                    points[0][2] + (points[1][2] - points[0][2]) * t
+                )
+                sampled.append(pt)
+            sampled.append(points[1])
+            return sampled
+        
+        sampled = [points[0]]  # Start with first point
+        
+        # For each segment between control points, use Catmull-Rom interpolation
+        for i in range(len(points) - 1):
+            # Get 4 control points for Catmull-Rom (p0, p1, p2, p3)
+            # p1 and p2 are the segment endpoints
+            p0 = points[max(0, i - 1)]
+            p1 = points[i]
+            p2 = points[i + 1]
+            p3 = points[min(len(points) - 1, i + 2)]
+            
+            # Detect if this is a bend segment
+            v1 = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+            v2 = (p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2])
+            len1 = math.sqrt(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2])
+            len2 = math.sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2])
+            
+            is_bend = False
+            if len1 > 0.001 and len2 > 0.001:
+                v1_norm = (v1[0]/len1, v1[1]/len1, v1[2]/len1)
+                v2_norm = (v2[0]/len2, v2[1]/len2, v2[2]/len2)
+                dot = v1_norm[0]*v2_norm[0] + v1_norm[1]*v2_norm[1] + v1_norm[2]*v2_norm[2]
+                angle = math.acos(max(-1.0, min(1.0, dot)))
+                if angle > math.radians(30) and angle < math.radians(150):
+                    is_bend = True
+            
+            # Use more samples for bends
+            samples = num_segments if is_bend else max(64, int(num_segments / 4))
+            
+            # Sample Catmull-Rom curve between p1 and p2
+            for j in range(1, samples + 1):
+                t = j / (samples + 1)
+                # Catmull-Rom spline formula (centripetal parameterization)
+                t2 = t * t
+                t3 = t2 * t
+                
+                x = 0.5 * ((2 * p1[0]) +
+                          (-p0[0] + p2[0]) * t +
+                          (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                          (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+                
+                y = 0.5 * ((2 * p1[1]) +
+                          (-p0[1] + p2[1]) * t +
+                          (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                          (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+                
+                z = 0.5 * ((2 * p1[2]) +
+                          (-p0[2] + p2[2]) * t +
+                          (2 * p0[2] - 5 * p1[2] + 4 * p2[2] - p3[2]) * t2 +
+                          (-p0[2] + 3 * p1[2] - 3 * p2[2] + p3[2]) * t3)
+                
+                sampled.append((x, y, z))
+        
+        sampled.append(points[-1])  # End with last point
+        return sampled
+    
+    # Sample the curve VERY densely for smooth filleted bends
+    # Use adaptive sampling: MANY samples at bends (512), more on straight segments (128)
+    # IFC viewers render polylines as faceted, so we need many small segments to approximate smooth curves
+    def sample_catmull_rom_adaptive(points, base_samples=32, bend_samples=128):
+        """Sample a Catmull-Rom spline through control points with adaptive density at bends."""
+        if len(points) < 2:
+            return points
+        if len(points) == 2:
+            return points
+        
+        sampled = [points[0]]  # Start with first point
+        
+        # For each segment between control points, sample the curve
+        for i in range(len(points) - 1):
+            p0 = points[max(0, i - 1)]
+            p1 = points[i]
+            p2 = points[i + 1]
+            p3 = points[min(len(points) - 1, i + 2)]
+            
+            # Calculate angle change to detect bends
+            # Vector from p0 to p1
+            v1 = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+            # Vector from p1 to p2
+            v2 = (p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2])
+            # Vector from p2 to p3
+            v3 = (p3[0] - p2[0], p3[1] - p2[1], p3[2] - p2[2])
+            
+            # Calculate lengths
+            len1 = math.sqrt(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2])
+            len2 = math.sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2])
+            len3 = math.sqrt(v3[0]*v3[0] + v3[1]*v3[1] + v3[2]*v3[2])
+            
+            # Normalize vectors
+            if len1 > 0.001:
+                v1 = (v1[0]/len1, v1[1]/len1, v1[2]/len1)
+            if len2 > 0.001:
+                v2 = (v2[0]/len2, v2[1]/len2, v2[2]/len2)
+            if len3 > 0.001:
+                v3 = (v3[0]/len3, v3[1]/len3, v3[2]/len3)
+            
+            # Calculate angle changes (dot product gives cosine of angle)
+            angle1 = math.acos(max(-1.0, min(1.0, v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2])))
+            angle2 = math.acos(max(-1.0, min(1.0, v2[0]*v3[0] + v2[1]*v3[1] + v2[2]*v3[2])))
+            
+            # Use more samples if there's a significant bend (angle > 15 degrees)
+            max_angle = max(angle1, angle2)
+            is_bend = max_angle > math.radians(15)
+            num_samples = bend_samples if is_bend else base_samples
+            
+            # Sample the Catmull-Rom curve between p1 and p2
+            for j in range(1, num_samples + 1):
+                t = j / (num_samples + 1)
+                # Catmull-Rom spline formula
+                t2 = t * t
+                t3 = t2 * t
+                
+                x = 0.5 * ((2 * p1[0]) +
+                          (-p0[0] + p2[0]) * t +
+                          (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                          (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+                
+                y = 0.5 * ((2 * p1[1]) +
+                          (-p0[1] + p2[1]) * t +
+                          (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                          (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+                
+                z = 0.5 * ((2 * p1[2]) +
+                          (-p0[2] + p2[2]) * t +
+                          (2 * p0[2] - 5 * p1[2] + 4 * p2[2] - p3[2]) * t2 +
+                          (-p0[2] + 3 * p1[2] - 3 * p2[2] + p3[2]) * t3)
+                
+                sampled.append((x, y, z))
+        
+        sampled.append(points[-1])  # End with last point
+        return sampled
+    
+    # Use Catmull-Rom spline interpolation (same as Three.js in the 3D viewer)
+    # This creates smooth curves through the control points
+    # 512 samples for bends ensures smooth curves even in faceted IFC viewers
+    sampled_points = sample_path_with_catmull_rom(points_ifc, num_segments=512)
+    
+    print(f"[LIGHT CONNECTION]   Sampled {len(sampled_points)} points from {len(points_ifc)} control points")
+    
+    # Create circular profile for extrusion (same as pipes)
+    circle_profile = ifc_file.createIfcCircleProfileDef(
+        "AREA",  # ProfileType
+        None,    # ProfileName
+        ifc_file.createIfcAxis2Placement2D(
+            ifc_file.createIfcCartesianPoint((0.0, 0.0)),
+            None
+        ),
+        radius   # Radius
+    )
+    
+    # Create many small extruded segments between consecutive sampled points
+    # This approximates a smooth curve with many short straight segments
+    # Similar to pipes but with much higher density for smooth curves
     extruded_solids = []
     segments_created = 0
+    total_length = 0.0
     
     # Calculate overlap to eliminate gaps at bends
-    overlap = radius * 0.5
+    overlap = radius * 0.3  # Smaller overlap since we have many segments
     
-    for i in range(len(points_ifc) - 1):
-        pt1 = points_ifc[i]
-        pt2 = points_ifc[i + 1]
+    for i in range(len(sampled_points) - 1):
+        pt1 = sampled_points[i]
+        pt2 = sampled_points[i + 1]
         
         # Calculate direction vector
         dx = pt2[0] - pt1[0]
@@ -3327,8 +3581,9 @@ def add_light_connection_to_ifc(
         length = math.sqrt(dx*dx + dy*dy + dz*dz)
         
         if length < 0.001:
-            print(f"[LIGHT CONNECTION]   Skipping zero-length segment {i}")
-            continue
+            continue  # Skip zero-length segments
+        
+        total_length += length
         
         # Normalize direction
         dir_x = dx / length
@@ -3337,7 +3592,7 @@ def add_light_connection_to_ifc(
         
         # Extend segment to overlap at joints (except at very start and very end)
         start_extension = overlap if i > 0 else 0
-        end_extension = overlap if i < len(points_ifc) - 2 else 0
+        end_extension = overlap if i < len(sampled_points) - 2 else 0
         extended_length = length + start_extension + end_extension
         
         # Offset start point backwards along direction for overlap
@@ -3382,7 +3637,7 @@ def add_light_connection_to_ifc(
             ref_direction    # X-axis (reference direction)
         )
         
-        # Create extruded area solid with extended length to close gaps at bends
+        # Create extruded area solid with extended length to close gaps
         extruded_solid = ifc_file.createIfcExtrudedAreaSolid(
             circle_profile,
             axis_placement,
@@ -3397,7 +3652,7 @@ def add_light_connection_to_ifc(
         print(f"[LIGHT CONNECTION] ⚠️ No valid segments created for {connection_id}")
         return None
     
-    print(f"[LIGHT CONNECTION]   Created {segments_created} extruded segments")
+    print(f"[LIGHT CONNECTION]   Created {segments_created} extruded segments (total length: {total_length:.3f}m)")
     
     # Create the IFC element - use IfcPipeSegment for compatibility
     conduit = ifc_run(
@@ -3419,11 +3674,12 @@ def add_light_connection_to_ifc(
     conduit.ObjectPlacement = placement
     
     # Create shape representation with all extruded solids
+    # Many small segments approximate a smooth curve
     shape_rep = ifc_file.createIfcShapeRepresentation(
         context,
         "Body",
         "SweptSolid",
-        extruded_solids  # All segments as separate solids
+        extruded_solids  # Many small segments for smooth curve approximation
     )
     
     # Create product definition shape
@@ -3448,7 +3704,7 @@ def add_light_connection_to_ifc(
     if color_hex:
         apply_color_to_element(ifc_file, conduit, color_hex)
     
-    print(f"[LIGHT CONNECTION]   ✅ Created successfully with {segments_created} segments")
+    print(f"[LIGHT CONNECTION]   ✅ Created successfully with {segments_created} segments approximating smooth curve")
     
     return conduit
 
@@ -3879,6 +4135,9 @@ def add_public_light_to_ifc(
 ):
     """
     Add a public light (pole, baseplate/foundation, fixture) to IFC file.
+
+    When fixtureConfig.mirroredTopFixture is true (shoebox/cobra), adds a second arm and
+    shoebox on the opposite side of the pole (horizontal mirror about the pole axis).
     
     Args:
         ifc_file: The IFC file object
@@ -4639,6 +4898,9 @@ def add_public_light_to_ifc(
         arm_end_x = pos_x
         arm_end_y = pos_y
         arm_end_z = pos_z + pole_height
+        mir_arm_end_x = arm_end_x
+        mir_arm_end_y = arm_end_y
+        mir_arm_end_z = arm_end_z
         
         if arm_length > 0.001:
             arm_angle_rad = math.radians(arm_angle)
@@ -4668,6 +4930,11 @@ def add_public_light_to_ifc(
             arm_end_x = pos_x + arm_dir_x * arm_length
             arm_end_y = pos_y + arm_dir_y * arm_length
             arm_end_z = arm_start_z + arm_dir_z * arm_length
+
+            # Opposite-side arm end (mirror about pole vertical axis — negate horizontal direction)
+            mir_arm_end_x = pos_x - arm_dir_x * arm_length
+            mir_arm_end_y = pos_y - arm_dir_y * arm_length
+            mir_arm_end_z = arm_end_z
             
             print(f"[PUBLIC LIGHT]   Arm direction: ({arm_dir_x:.3f}, {arm_dir_y:.3f}, {arm_dir_z:.3f})")
             print(f"[PUBLIC LIGHT]   Arm end position: ({arm_end_x:.3f}, {arm_end_y:.3f}, {arm_end_z:.3f})")
@@ -4712,11 +4979,44 @@ def add_public_light_to_ifc(
             )
             solids.append(arm_solid)
             print(f"[PUBLIC LIGHT]   Added arm geometry")
+
+            _style_key = fixture_config.get('style', 'shoebox').lower().replace('_', '').replace('-', '')
+            if fixture_config.get('mirroredTopFixture', False) and _style_key in ('shoebox', 'cobrahead'):
+                mir_dir_x = -arm_dir_x
+                mir_dir_y = -arm_dir_y
+                mir_dir_z = arm_dir_z
+                if abs(mir_dir_z) < 0.9:
+                    mref_x = -mir_dir_y
+                    mref_y = mir_dir_x
+                    mref_z = 0.0
+                else:
+                    mref_x = 1.0
+                    mref_y = 0.0
+                    mref_z = 0.0
+                mref_len = math.sqrt(mref_x**2 + mref_y**2 + mref_z**2)
+                if mref_len > 0.001:
+                    mref_x /= mref_len
+                    mref_y /= mref_len
+                    mref_z /= mref_len
+                arm_mir_placement = ifc_file.createIfcAxis2Placement3D(
+                    ifc_file.createIfcCartesianPoint((pos_x, pos_y, arm_start_z)),
+                    ifc_file.createIfcDirection((mir_dir_x, mir_dir_y, mir_dir_z)),
+                    ifc_file.createIfcDirection((mref_x, mref_y, mref_z))
+                )
+                arm_mir_solid = ifc_file.createIfcExtrudedAreaSolid(
+                    arm_profile,
+                    arm_mir_placement,
+                    ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
+                    arm_length
+                )
+                solids.append(arm_mir_solid)
+                print(f"[PUBLIC LIGHT]   Added opposite-side arm geometry (pole mirror)")
         
         # === FIXTURE HOUSING ===
         fixture_style = fixture_config.get('style', 'shoebox')
         fixture_count = fixture_config.get('fixtureCount', 1)
         fixture_spacing = fixture_config.get('fixtureSpacing', 0) / 1000  # mm to m
+        mirrored_top_fixture = fixture_config.get('mirroredTopFixture', False)
         dimensions = fixture_config.get('dimensions', {'width': 600, 'height': 300, 'depth': 400})
         housing_color = fixture_config.get('housingColor', '#404040')
         
@@ -4973,6 +5273,25 @@ def add_public_light_to_ifc(
                 )
                 solids.append(fixture_solid)
                 print(f"[PUBLIC LIGHT]   Added shoebox geometry")
+
+                if mirrored_top_fixture and arm_length > 0.001:
+                    # Second shoebox on opposite side of pole (same as Three.js pole-axis mirror)
+                    mir_fix_x = mir_arm_end_x + math.cos(rotation) * fixture_spacing * i
+                    mir_fix_y = mir_arm_end_y + math.sin(rotation) * fixture_spacing * i
+                    mir_fix_z = mir_arm_end_z - fixture_height
+                    opp_rot = rotation + math.pi
+                    mir_placement = ifc_file.createIfcAxis2Placement3D(
+                        ifc_file.createIfcCartesianPoint((mir_fix_x, mir_fix_y, mir_fix_z)),
+                        ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
+                        ifc_file.createIfcDirection((math.cos(opp_rot), math.sin(opp_rot), 0.0))
+                    )
+                    mir_solid = ifc_file.createIfcExtrudedAreaSolid(
+                        fixture_profile, mir_placement,
+                        ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
+                        fixture_height
+                    )
+                    solids.append(mir_solid)
+                    print(f"[PUBLIC LIGHT]   Added opposite-side shoebox geometry (pole mirror)")
         
         # Create the IFC element - use IfcLightFixture
         light_element = ifc_run(
@@ -5077,6 +5396,87 @@ def add_public_light_to_ifc(
         return None
 
 
+def add_hardstanding_to_ifc(
+    ifc_file,
+    storey,
+    context,
+    hardstanding_data,
+    project_coords=None,
+    coordinate_mode="absolute",
+    origin_tuple=None,
+    progress_callback=None,
+):
+    """Add a hardstanding area and its solid meshes (layers, kerbs, bedding, haunch) to IFC."""
+    area_id = hardstanding_data.get("areaId", "Hardstanding")
+    area_name = hardstanding_data.get("name", area_id)
+    components = hardstanding_data.get("components", [])
+
+    print(f"\n[HARDSTANDING] Adding area: {area_name}")
+    print(f"[HARDSTANDING]   Components: {len(components)}")
+
+    origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
+    created_elements = []
+    total_components = len(components)
+
+    comp_type_to_ifc = {
+        "layer": "hardstanding",
+        "kerb": "kerb",
+        "bedding": "bedding",
+        "haunch": "haunch",
+    }
+
+    for comp_idx, component in enumerate(components):
+        comp_type = component.get("type", "layer")
+        color_hex = component.get("color")
+        vertices = component.get("vertices", [])
+        indices = component.get("indices", [])
+        source_type = component.get("sourceType")
+        layer_name = component.get("layerName")
+
+        element_name = f"{area_name}_{comp_type}"
+        if layer_name:
+            element_name += f"_{layer_name}"
+        if source_type:
+            element_name += f"_{source_type}"
+
+        print(
+            f"[HARDSTANDING]   Component {comp_idx + 1}/{total_components}: "
+            f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
+        )
+
+        if progress_callback and (comp_idx % 5 == 0 or comp_idx == total_components - 1):
+            progress_callback(
+                comp_idx + 1,
+                total_components,
+                f"Processing component {comp_idx + 1}/{total_components}: {comp_type}",
+            )
+
+        if len(vertices) < 3 or len(indices) < 3:
+            print(f"[HARDSTANDING]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            continue
+
+        ifc_comp_type = comp_type_to_ifc.get(comp_type, "hardstanding")
+        element = create_road_mesh_element(
+            ifc_file,
+            storey,
+            context,
+            element_name,
+            component,
+            origin_tuple,
+            coordinate_mode,
+            color_hex,
+            ifc_comp_type,
+        )
+        if element:
+            created_elements.append(element)
+            print(f"[HARDSTANDING]   ✅ Created {comp_type} element: {element_name}")
+        else:
+            print(f"[HARDSTANDING]   ⚠️ Failed to create {comp_type} element: {element_name}")
+
+    print(f"[HARDSTANDING]   ✅ Area created with {len(created_elements)} elements")
+    return created_elements
+
+
 def export_chambers_to_ifc(
     chambers_data,
     output_path,
@@ -5087,11 +5487,12 @@ def export_chambers_to_ifc(
     public_lights_data=None,
     light_connections_data=None,
     roads_data=None,
+    hardstandings_data=None,
     coordinate_mode="absolute",
     progress_callback=None,
 ):
     """
-    Export chambers, pipes, roads, public lights, and light connections to IFC file
+    Export chambers, pipes, roads, hardstandings, public lights, and light connections to IFC file
     
     Args:
         chambers_data: List of chamber dictionaries
@@ -5101,6 +5502,7 @@ def export_chambers_to_ifc(
         public_lights_data: Optional list of public light dictionaries
         light_connections_data: Optional list of light connection dictionaries
         roads_data: Optional list of road dictionaries with components
+        hardstandings_data: Optional list of hardstanding area dictionaries with components
     """
     try:
         chamber_count = len(chambers_data)
@@ -5110,9 +5512,10 @@ def export_chambers_to_ifc(
         public_light_count = len(public_lights_data) if public_lights_data else 0
         light_connection_count = len(light_connections_data) if light_connections_data else 0
         road_count = len(roads_data) if roads_data else 0
-        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count
+        hardstanding_count = len(hardstandings_data) if hardstandings_data else 0
+        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count
         print(
-            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, and {road_count} roads"
+            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, and {hardstanding_count} hardstandings"
         )
 
         coordinate_mode = (coordinate_mode or "absolute").lower()
@@ -5341,6 +5744,55 @@ def export_chambers_to_ifc(
             print(f"[EXPORT] Road components created: {road_components_created}")
             print(f"[EXPORT] ═════════════════════\n")
 
+        # Export hardstanding areas (paved surfaces, kerbs, build-up layers)
+        hardstandings_created = 0
+        hardstanding_components_created = 0
+        if hardstandings_data:
+            for index, hardstanding in enumerate(hardstandings_data, start=1):
+                print(
+                    f"[EXPORT] Adding hardstanding {index}/{hardstanding_count}: "
+                    f"{hardstanding.get('name', hardstanding.get('areaId', 'Hardstanding'))}"
+                )
+                components = hardstanding.get("components", [])
+                hardstanding_start_item = current_item
+
+                def hardstanding_progress_callback(comp_idx, comp_total, comp_message):
+                    if progress_callback:
+                        progress_callback(
+                            "hardstandings",
+                            hardstanding_start_item,
+                            total_items,
+                            f"Hardstanding {index}/{hardstanding_count}: {comp_message} ({comp_idx}/{comp_total} components)",
+                        )
+
+                result = add_hardstanding_to_ifc(
+                    ifc_file,
+                    storey,
+                    context,
+                    hardstanding,
+                    project_coords,
+                    coordinate_mode=coordinate_mode,
+                    origin_tuple=origin_tuple,
+                    progress_callback=hardstanding_progress_callback if progress_callback else None,
+                )
+                if result:
+                    hardstandings_created += 1
+                    hardstanding_components_created += len(result)
+                current_item += 1
+                if progress_callback:
+                    progress_callback(
+                        "hardstandings",
+                        current_item,
+                        total_items,
+                        f"Completed hardstanding {index}/{hardstanding_count} ({len(components)} components)",
+                    )
+
+            print(f"\n[EXPORT] ═══ HARDSTANDING SUMMARY ═══")
+            print(f"[EXPORT] Total hardstandings requested: {hardstanding_count}")
+            print(f"[EXPORT] Hardstandings created: {hardstandings_created}")
+            print(f"[EXPORT] Hardstanding components created: {hardstanding_components_created}")
+            print(f"[EXPORT] ═══════════════════════════\n")
+
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
         print(f"[EXPORT] Writing IFC to {output_path}")
@@ -5360,6 +5812,8 @@ def export_chambers_to_ifc(
             "light_connections_count": light_connection_count,
             "roads_count": road_count,
             "road_components_count": road_components_created,
+            "hardstandings_count": hardstanding_count,
+            "hardstanding_components_count": hardstanding_components_created,
         }
 
     except Exception as error:
