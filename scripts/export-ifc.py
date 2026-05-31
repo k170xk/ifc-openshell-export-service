@@ -2009,7 +2009,9 @@ def add_road_to_ifc(
             element_name += f"_{comp_side}"
         if component.get("wideningGroupId"):
             element_name += f"_{component.get('wideningGroupId')}"
-        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening"):
+        if component.get("islandId"):
+            element_name += f"_{component.get('islandId')}"
+        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "kerb", "bedding"):
             element_name += f"_{component.get('sourceType')}"
         if component.get("featureId"):
             element_name += f"_{component.get('featureId')}"
@@ -2031,16 +2033,24 @@ def add_road_to_ifc(
                 created_elements.append(element)
                 
         elif comp_type in ("kerb", "footway", "bedding", "haunch"):
-            # These are swept solids along a path
-            element = create_road_swept_element(
-                ifc_file, storey, context,
-                element_name, component, comp_type,
-                origin_tuple, coordinate_mode, color_hex
-            )
+            # Triangulated island kerbs (and similar) export as meshes; swept paths use centerline profiles.
+            if len(vertices) >= 3 and len(indices) >= 3:
+                element = create_road_mesh_element(
+                    ifc_file, storey, context,
+                    element_name, component,
+                    origin_tuple, coordinate_mode, color_hex,
+                    comp_type,
+                )
+            else:
+                element = create_road_swept_element(
+                    ifc_file, storey, context,
+                    element_name, component, comp_type,
+                    origin_tuple, coordinate_mode, color_hex
+                )
             if element:
                 created_elements.append(element)
                 
-        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening"):
+        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island"):
             # Offset features and widening fold strips are exported as triangulated meshes.
             # They preserve exact geometry including crossfalls, profiles, and layers
             vertices = component.get("vertices", [])
@@ -2202,7 +2212,7 @@ def create_road_mesh_element(
     if comp_type == "carriageway":
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
-    elif comp_type in ("footpath", "verge", "swale", "ditch", "widening", "hardstanding"):
+    elif comp_type in ("footpath", "verge", "swale", "ditch", "widening", "hardstanding", "island"):
         # All surface features use IfcSlab with PAVING for consistent visibility
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
