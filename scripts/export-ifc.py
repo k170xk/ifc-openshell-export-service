@@ -2050,7 +2050,7 @@ def add_road_to_ifc(
             if element:
                 created_elements.append(element)
                 
-        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island"):
+        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "raised-table"):
             # Offset features and widening fold strips are exported as triangulated meshes.
             # They preserve exact geometry including crossfalls, profiles, and layers
             vertices = component.get("vertices", [])
@@ -2214,6 +2214,11 @@ def create_road_mesh_element(
         predefined_type = "PAVING"
     elif comp_type in ("footpath", "verge", "swale", "ditch", "widening", "hardstanding", "island"):
         # All surface features use IfcSlab with PAVING for consistent visibility
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
+    elif comp_type == "raised-table":
+        # Raised tables (speed tables / raised junctions) are closed solid add-ons
+        # sitting on the carriageway. Export as a paving slab for viewer visibility.
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
     elif comp_type == "wall":
