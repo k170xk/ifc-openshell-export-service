@@ -3835,17 +3835,19 @@ def create_sign_geometry(
     # So the world-space forward direction in Three.js is (sin(rotation), 0, cos(rotation))
     # In IFC this becomes (sin(rotation), -cos(rotation), 0)
     
-    # Direction the sign faces (outward from sign face)
-    # Use same formula as baseplate which works correctly: (cos, sin)
-    # The sign plate is positioned at pole_radius distance from pole center
-    # and faces outward in the direction of rotation
-    extrude_dir_x = math.cos(rotation)
-    extrude_dir_y = math.sin(rotation)
+    # Direction the sign faces (outward from sign face).
+    # The sign's face normal is the group's local +Z, whereas the light arm is
+    # the group's local +X. The arm export uses (cos, sin) and is known-correct,
+    # so the sign face (90 deg from the arm) must be (sin, -cos). Using (cos, sin)
+    # here -- as the rotationally-symmetric baseplate does -- left every sign 90 deg
+    # off from how it is modelled.
+    extrude_dir_x = math.sin(rotation)
+    extrude_dir_y = -math.cos(rotation)
     
-    # Perpendicular direction (left/right on sign face)
-    # 90 degrees rotated from extrude direction
-    perp_dir_x = -math.sin(rotation)
-    perp_dir_y = math.cos(rotation)
+    # Perpendicular direction (left/right on sign face) = the sign's local +X,
+    # which matches the arm heading (cos, sin).
+    perp_dir_x = math.cos(rotation)
+    perp_dir_y = math.sin(rotation)
     
     print(f"[SIGN] Rotation: {rotation:.4f} rad ({math.degrees(rotation):.1f} deg)")
     print(f"[SIGN] Extrude direction (sign faces): ({extrude_dir_x:.3f}, {extrude_dir_y:.3f})")
