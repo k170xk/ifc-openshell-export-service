@@ -1999,6 +1999,12 @@ def add_road_to_ifc(
     
     for comp_idx, component in enumerate(components):
         comp_type = component.get("type", "unknown")
+        source_type = component.get("sourceType") or ""
+        # Legacy payloads tagged markings as carriageway slabs — normalize for export.
+        if comp_type == "carriageway" and (
+            "road-marking" in source_type or source_type == "raised-table-ramp-arrow"
+        ):
+            comp_type = "road-marking"
         comp_side = component.get("side")
         color_hex = component.get("color")
         vertices = component.get("vertices", [])
@@ -2011,8 +2017,12 @@ def add_road_to_ifc(
             element_name += f"_{component.get('wideningGroupId')}"
         if component.get("islandId"):
             element_name += f"_{component.get('islandId')}"
-        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "kerb", "bedding"):
+        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "kerb", "bedding", "road-marking", "raised-table"):
             element_name += f"_{component.get('sourceType')}"
+        if component.get("markingId"):
+            element_name += f"_{component.get('markingId')}"
+        if component.get("raisedTableId"):
+            element_name += f"_{component.get('raisedTableId')}"
         if component.get("featureId"):
             element_name += f"_{component.get('featureId')}"
         
@@ -2022,12 +2032,13 @@ def add_road_to_ifc(
         if progress_callback and (comp_idx % 10 == 0 or comp_idx == total_components - 1):
             progress_callback(comp_idx + 1, total_components, f"Processing component {comp_idx + 1}/{total_components}: {comp_type}")
         
-        if comp_type == "carriageway":
-            # Carriageway is a triangulated mesh
+        if comp_type in ("carriageway", "road-marking"):
+            # Carriageway and road markings are triangulated meshes
             element = create_road_mesh_element(
                 ifc_file, storey, context,
                 element_name, component,
-                origin_tuple, coordinate_mode, color_hex
+                origin_tuple, coordinate_mode, color_hex,
+                comp_type,
             )
             if element:
                 created_elements.append(element)
@@ -2212,6 +2223,9 @@ def create_road_mesh_element(
     if comp_type == "carriageway":
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
+    elif comp_type == "road-marking":
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
     elif comp_type in ("footpath", "verge", "swale", "ditch", "widening", "hardstanding", "island"):
         # All surface features use IfcSlab with PAVING for consistent visibility
         ifc_class = "IfcSlab"
@@ -2299,6 +2313,8 @@ def create_road_mesh_element(
             "Side": component.get("side"),
             "FeatureId": component.get("featureId"),
             "FeatureType": component.get("featureType"),
+            "MarkingId": component.get("markingId"),
+            "RaisedTableId": component.get("raisedTableId"),
             "WideningGroupId": component.get("wideningGroupId"),
             "WideningPreset": component.get("wideningPreset"),
             "RelatedWideningGroupIds": component.get("relatedWideningGroupIds", []),
