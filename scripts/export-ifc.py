@@ -2230,6 +2230,9 @@ def create_road_mesh_element(
         # All surface features use IfcSlab with PAVING for consistent visibility
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
+    elif comp_type in ("aco-channel", "aco-grate", "aco-concrete", "bwh-cover", "bwh-saddle"):
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
     elif comp_type == "raised-table":
         # Raised tables (speed tables / raised junctions) are closed solid add-ons
         # sitting on the carriageway. Export as a paving slab for viewer visibility.
@@ -5510,6 +5513,87 @@ def add_hardstanding_to_ifc(
     return created_elements
 
 
+def add_drainage_elements_to_ifc(
+    ifc_file,
+    storey,
+    context,
+    element_data,
+    project_coords=None,
+    coordinate_mode="absolute",
+    origin_tuple=None,
+    progress_callback=None,
+):
+    """Add drainage mesh elements (ACO channels, BWH covers, saddle connections) to IFC."""
+    element_id = element_data.get("elementId", "Drainage")
+    element_name = element_data.get("name", element_id)
+    element_type = element_data.get("elementType", "drainage")
+    components = element_data.get("components", [])
+
+    print(f"\n[DRAINAGE] Adding element: {element_name} ({element_type})")
+    print(f"[DRAINAGE]   Components: {len(components)}")
+
+    origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
+    created_elements = []
+    total_components = len(components)
+
+    comp_type_to_ifc = {
+        "aco-body": "aco-channel",
+        "aco-grate-frame": "aco-grate",
+        "aco-grate-bars": "aco-grate",
+        "aco-concrete": "aco-concrete",
+        "bwh-cover": "bwh-cover",
+        "bwh-saddle": "bwh-saddle",
+    }
+
+    for comp_idx, component in enumerate(components):
+        comp_type = component.get("type", "aco-body")
+        color_hex = component.get("color")
+        vertices = component.get("vertices", [])
+        indices = component.get("indices", [])
+        part_name = component.get("partName")
+
+        mesh_label = f"{element_name}_{comp_type}"
+        if part_name:
+            mesh_label += f"_{part_name}"
+
+        print(
+            f"[DRAINAGE]   Component {comp_idx + 1}/{total_components}: "
+            f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
+        )
+
+        if progress_callback and (comp_idx % 5 == 0 or comp_idx == total_components - 1):
+            progress_callback(
+                comp_idx + 1,
+                total_components,
+                f"Processing component {comp_idx + 1}/{total_components}: {comp_type}",
+            )
+
+        if len(vertices) < 3 or len(indices) < 3:
+            print(f"[DRAINAGE]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            continue
+
+        ifc_comp_type = comp_type_to_ifc.get(comp_type, element_type)
+        mesh_element = create_road_mesh_element(
+            ifc_file,
+            storey,
+            context,
+            mesh_label,
+            component,
+            origin_tuple,
+            coordinate_mode,
+            color_hex,
+            ifc_comp_type,
+        )
+        if mesh_element:
+            created_elements.append(mesh_element)
+            print(f"[DRAINAGE]   ✅ Created {comp_type} element: {mesh_label}")
+        else:
+            print(f"[DRAINAGE]   ⚠️ Failed to create {comp_type} element: {mesh_label}")
+
+    print(f"[DRAINAGE]   ✅ Element created with {len(created_elements)} mesh parts")
+    return created_elements
+
+
 def export_chambers_to_ifc(
     chambers_data,
     output_path,
@@ -5521,6 +5605,7 @@ def export_chambers_to_ifc(
     light_connections_data=None,
     roads_data=None,
     hardstandings_data=None,
+    drainage_elements_data=None,
     coordinate_mode="absolute",
     progress_callback=None,
 ):
@@ -5546,9 +5631,10 @@ def export_chambers_to_ifc(
         light_connection_count = len(light_connections_data) if light_connections_data else 0
         road_count = len(roads_data) if roads_data else 0
         hardstanding_count = len(hardstandings_data) if hardstandings_data else 0
-        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count
+        drainage_count = len(drainage_elements_data) if drainage_elements_data else 0
+        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count
         print(
-            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, and {hardstanding_count} hardstandings"
+            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, and {drainage_count} drainage elements"
         )
 
         coordinate_mode = (coordinate_mode or "absolute").lower()
@@ -5826,6 +5912,56 @@ def export_chambers_to_ifc(
             print(f"[EXPORT] Hardstanding components created: {hardstanding_components_created}")
             print(f"[EXPORT] ═══════════════════════════\n")
 
+        # Export drainage mesh elements (ACO channels, BWH covers, saddle connections)
+        drainage_elements_created = 0
+        drainage_components_created = 0
+        if drainage_elements_data:
+            drainage_count = len(drainage_elements_data)
+            print(f"\n[EXPORT] ═══ DRAINAGE ELEMENTS ═══")
+            print(f"[EXPORT] Total drainage elements requested: {drainage_count}")
+
+            for index, element in enumerate(drainage_elements_data, start=1):
+                element_name = element.get("name", element.get("elementId", "Drainage"))
+                components = element.get("components", [])
+                drainage_start_item = current_item
+
+                def drainage_progress_callback(comp_idx, comp_total, comp_message):
+                    if progress_callback:
+                        progress_callback(
+                            "drainage",
+                            drainage_start_item,
+                            total_items,
+                            f"Drainage {index}/{drainage_count}: {comp_message} ({comp_idx}/{comp_total} components)",
+                        )
+
+                result = add_drainage_elements_to_ifc(
+                    ifc_file,
+                    storey,
+                    context,
+                    element,
+                    project_coords,
+                    coordinate_mode=coordinate_mode,
+                    origin_tuple=origin_tuple,
+                    progress_callback=drainage_progress_callback if progress_callback else None,
+                )
+                if result:
+                    drainage_elements_created += 1
+                    drainage_components_created += len(result)
+                current_item += 1
+                if progress_callback:
+                    progress_callback(
+                        "drainage",
+                        current_item,
+                        total_items,
+                        f"Completed drainage element {index}/{drainage_count} ({len(components)} components)",
+                    )
+
+            print(f"\n[EXPORT] ═══ DRAINAGE SUMMARY ═══")
+            print(f"[EXPORT] Total drainage elements requested: {drainage_count}")
+            print(f"[EXPORT] Drainage elements created: {drainage_elements_created}")
+            print(f"[EXPORT] Drainage components created: {drainage_components_created}")
+            print(f"[EXPORT] ═══════════════════════════\n")
+
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
         print(f"[EXPORT] Writing IFC to {output_path}")
@@ -5847,6 +5983,8 @@ def export_chambers_to_ifc(
             "road_components_count": road_components_created,
             "hardstandings_count": hardstanding_count,
             "hardstanding_components_count": hardstanding_components_created,
+            "drainage_elements_count": drainage_count if drainage_elements_data else 0,
+            "drainage_components_count": drainage_components_created if drainage_elements_data else 0,
         }
 
     except Exception as error:

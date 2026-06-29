@@ -297,10 +297,11 @@ def export_chambers():
         light_connections = data.get("lightConnections", [])
         roads = data.get("roads", [])
         hardstandings = data.get("hardstandings", [])
+        drainage_elements = data.get("drainageElements", [])
         project = data.get("project", {})
         coordinate_mode = data.get("coordinateMode", "absolute")
         
-        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings)
+        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings) + len(drainage_elements)
         
         # Initialize progress
         update_progress(export_id, {
@@ -313,7 +314,7 @@ def export_chambers():
         
         print("=" * 70)
         print(f"[API] Export request received (ID: {export_id})")
-        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings")
+        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings, {len(drainage_elements)} drainage elements")
         print("=" * 70)
         sys.stdout.flush()
         
@@ -354,6 +355,7 @@ def export_chambers():
             light_connections_data=light_connections,
             roads_data=roads,
             hardstandings_data=hardstandings,
+            drainage_elements_data=drainage_elements,
             coordinate_mode=coordinate_mode,
             progress_callback=progress_callback,
         )
