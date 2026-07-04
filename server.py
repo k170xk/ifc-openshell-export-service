@@ -229,7 +229,7 @@ def get_export_progress(export_id):
                 else:
                     # Send initial message if no progress yet
                     if last_timestamp == 0:
-                        yield f"data: {json.dumps({'type': 'start', 'message': 'Waiting for export to start...', 'progress': 0})}\n\n"
+                        yield f"data: {json.dumps({'type': 'start', 'message': 'Waiting for export payload...', 'progress': 0})}\n\n"
                 
                 time.sleep(0.5)  # Poll every 500ms
         except GeneratorExit:
