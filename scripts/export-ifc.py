@@ -1746,9 +1746,12 @@ def add_pipe_to_ifc(
     is_bend = pipe_data.get("isBend", False)
     points = pipe_data.get("points", None)  # Path points for multi-segment pipes
     color_hex = pipe_data.get("color", None)  # Hex color (e.g., "#FF0000")
+    drainage_connection = pipe_data.get("drainageConnection")
     
     print(f"\n[PIPE] Adding pipe: {pipe_id}")
     print(f"[PIPE]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
+    if drainage_connection:
+        print(f"[PIPE]   Drainage connection: {drainage_connection}")
     print(f"[PIPE]   Start (Y-up): {start_point}")
     print(f"[PIPE]   End (Y-up): {end_point}")
     print(f"[PIPE]   Diameter: {diameter}m")
@@ -2241,6 +2244,21 @@ def create_road_mesh_element(
     elif comp_type == "wall":
         ifc_class = "IfcWall"
         predefined_type = "USERDEFINED"
+    elif comp_type in ("building-walls", "building-roof", "building"):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "NOTDEFINED"
+    elif comp_type == "duct":
+        ifc_class = "IfcDuctSegment"
+        predefined_type = "RIGIDSEGMENT"
+    elif comp_type == "cable-tray":
+        ifc_class = "IfcCableCarrierSegment"
+        predefined_type = "CABLETRAYSEGMENT"
+    elif comp_type in ("duct-hanger", "cable-tray-hanger"):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "NOTDEFINED"
+    elif comp_type == "terrain":
+        ifc_class = "IfcGeographicElement"
+        predefined_type = "TERRAIN"
     elif comp_type in ("fence", "hedge", "custom"):
         # Use IfcSlab for fence/hedge too to ensure visibility (they're surface features)
         # IfcBuildingElementProxy might not render in some viewers
@@ -2309,21 +2327,29 @@ def create_road_mesh_element(
         except Exception as e:
             print(f"[ROAD]     ⚠️ WARNING: Could not apply color: {e}")
 
-    try:
-        add_custom_property_set(ifc_file, road_element, "Pset_InfraGridRoadComponent", {
-            "ComponentType": comp_type,
-            "SourceType": component.get("sourceType"),
-            "Side": component.get("side"),
-            "FeatureId": component.get("featureId"),
-            "FeatureType": component.get("featureType"),
-            "MarkingId": component.get("markingId"),
-            "RaisedTableId": component.get("raisedTableId"),
-            "WideningGroupId": component.get("wideningGroupId"),
-            "WideningPreset": component.get("wideningPreset"),
-            "RelatedWideningGroupIds": component.get("relatedWideningGroupIds", []),
-        })
-    except Exception as e:
-        print(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
+    # Site mesh element types (buildings, ducts, cable trays, terrain) carry
+    # their own Pset_InfraGridSiteElement instead of the road component pset.
+    site_mesh_comp_types = (
+        "building-walls", "building-roof", "building",
+        "duct", "duct-hanger", "cable-tray", "cable-tray-hanger", "terrain",
+        "pipe-flow-arrow", "pipe-gradient-stamp", "pipe-flow-sticker",
+    )
+    if comp_type not in site_mesh_comp_types:
+        try:
+            add_custom_property_set(ifc_file, road_element, "Pset_InfraGridRoadComponent", {
+                "ComponentType": comp_type,
+                "SourceType": component.get("sourceType"),
+                "Side": component.get("side"),
+                "FeatureId": component.get("featureId"),
+                "FeatureType": component.get("featureType"),
+                "MarkingId": component.get("markingId"),
+                "RaisedTableId": component.get("raisedTableId"),
+                "WideningGroupId": component.get("wideningGroupId"),
+                "WideningPreset": component.get("wideningPreset"),
+                "RelatedWideningGroupIds": component.get("relatedWideningGroupIds", []),
+            })
+        except Exception as e:
+            print(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
     
     print(f"[ROAD]     ✅ Successfully created {comp_type} element: {element_name}")
     return road_element
@@ -3858,7 +3884,7 @@ def create_sign_geometry(
     # The sign's face normal is the group's local +Z, whereas the light arm is
     # the group's local +X. The arm export uses (cos, sin) and is known-correct,
     # so the sign face (90 deg from the arm) must be (sin, -cos). Using (cos, sin)
-    # here -- as the rotationally-symmetric baseplate does -- left every sign 90 deg
+    # here — as the rotationally-symmetric baseplate does — left every sign 90 deg
     # off from how it is modelled.
     extrude_dir_x = math.sin(rotation)
     extrude_dir_y = -math.cos(rotation)
@@ -5594,6 +5620,210 @@ def add_drainage_elements_to_ifc(
     return created_elements
 
 
+def add_retaining_wall_to_ifc(
+    ifc_file,
+    storey,
+    context,
+    wall_data,
+    project_coords=None,
+    coordinate_mode="absolute",
+    origin_tuple=None,
+    progress_callback=None,
+):
+    """Add a retaining wall (concrete/RC, sheet pile, or secant pile) to IFC.
+
+    Each wall arrives as one or more triangulated mesh components (stem +
+    footing + cap + piles merged) and is exported as IfcWall with a
+    Pset_InfraGridRetainingWall property set carrying the design parameters.
+    """
+    wall_id = wall_data.get("wallId", "RetainingWall")
+    wall_name = wall_data.get("name", wall_id)
+    wall_type = wall_data.get("retainingWallType", "normal")
+    metadata = wall_data.get("metadata") or {}
+    components = wall_data.get("components", [])
+
+    print(f"\n[RETAINING WALL] Adding wall: {wall_name} ({wall_type})")
+    print(f"[RETAINING WALL]   Components: {len(components)}")
+
+    origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
+    created_elements = []
+    total_components = len(components)
+
+    for comp_idx, component in enumerate(components):
+        color_hex = component.get("color")
+        vertices = component.get("vertices", [])
+        indices = component.get("indices", [])
+        part_name = component.get("partName")
+
+        mesh_label = wall_name
+        if part_name and total_components > 1:
+            mesh_label += f"_{part_name}"
+
+        print(
+            f"[RETAINING WALL]   Component {comp_idx + 1}/{total_components}: "
+            f"{len(vertices)} vertices, {len(indices)} indices"
+        )
+
+        if progress_callback and (comp_idx % 5 == 0 or comp_idx == total_components - 1):
+            progress_callback(
+                comp_idx + 1,
+                total_components,
+                f"Processing component {comp_idx + 1}/{total_components}",
+            )
+
+        if len(vertices) < 3 or len(indices) < 3:
+            print(f"[RETAINING WALL]   ⚠️ Skipping component: insufficient geometry")
+            continue
+
+        # comp_type "wall" maps to IfcWall in create_road_mesh_element.
+        element = create_road_mesh_element(
+            ifc_file,
+            storey,
+            context,
+            mesh_label,
+            component,
+            origin_tuple,
+            coordinate_mode,
+            color_hex,
+            "wall",
+        )
+        if not element:
+            print(f"[RETAINING WALL]   ⚠️ Failed to create element: {mesh_label}")
+            continue
+
+        try:
+            add_custom_property_set(ifc_file, element, "Pset_InfraGridRetainingWall", {
+                "WallId": wall_id,
+                "RetainingWallType": wall_type,
+                "RetainedSide": metadata.get("retainedSide"),
+                "LengthM": metadata.get("lengthM"),
+                "HeightM": metadata.get("heightM"),
+                "ThicknessM": metadata.get("thicknessM"),
+                "BaseElevationM": metadata.get("baseElevationM"),
+                "EmbedmentDepthM": metadata.get("embedmentDepthM"),
+                "FootingWidthM": metadata.get("footingWidthM"),
+                "FootingThicknessM": metadata.get("footingThicknessM"),
+                "ToeWidthM": metadata.get("toeWidthM"),
+                "HeelWidthM": metadata.get("heelWidthM"),
+                "BatterRatio": metadata.get("batterRatio"),
+                "CapHeightM": metadata.get("capHeightM"),
+                "CapOverhangM": metadata.get("capOverhangM"),
+                "DrainageEnabled": metadata.get("drainageEnabled"),
+                "WeepHoleSpacingM": metadata.get("weepHoleSpacingM"),
+                "MalePileDiameterM": metadata.get("malePileDiameterM"),
+                "FemalePileDiameterM": metadata.get("femalePileDiameterM"),
+                "PileSpacingM": metadata.get("pileSpacingM"),
+                "SheetPilePitchM": metadata.get("sheetPilePitchM"),
+                "SheetPileDepthM": metadata.get("sheetPileDepthM"),
+                "SheetPileThicknessM": metadata.get("sheetPileThicknessM"),
+                "MaterialPreset": metadata.get("materialPreset"),
+            })
+        except Exception as e:
+            print(f"[RETAINING WALL]   ⚠️ WARNING: Could not apply wall properties: {e}")
+
+        created_elements.append(element)
+        print(f"[RETAINING WALL]   ✅ Created wall element: {mesh_label}")
+
+    print(f"[RETAINING WALL]   ✅ Wall created with {len(created_elements)} mesh parts")
+    return created_elements
+
+
+def add_site_mesh_element_to_ifc(
+    ifc_file,
+    storey,
+    context,
+    element_data,
+    project_coords=None,
+    coordinate_mode="absolute",
+    origin_tuple=None,
+    progress_callback=None,
+):
+    """Add a generic site mesh element to IFC.
+
+    Element types map to IFC classes:
+      building           -> IfcBuildingElementProxy (walls + roof components)
+      duct               -> IfcDuctSegment (+ proxy hangers)
+      cable-tray         -> IfcCableCarrierSegment (+ proxy hangers)
+      terrain            -> IfcGeographicElement (TERRAIN)
+      pipe-flow-arrow    -> IfcBuildingElementProxy (embossed flow direction triangles)
+      pipe-gradient-stamp -> IfcBuildingElementProxy (embossed gradient / diameter labels)
+      pipe-flow-sticker  -> IfcBuildingElementProxy (combined sticker mesh fallback)
+    """
+    element_id = element_data.get("elementId", "SiteElement")
+    element_name = element_data.get("name", element_id)
+    element_type = element_data.get("elementType", "building")
+    metadata = element_data.get("metadata") or {}
+    components = element_data.get("components", [])
+
+    print(f"\n[SITE MESH] Adding element: {element_name} ({element_type})")
+    print(f"[SITE MESH]   Components: {len(components)}")
+
+    origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
+    created_elements = []
+    total_components = len(components)
+
+    for comp_idx, component in enumerate(components):
+        comp_type = component.get("type", element_type)
+        color_hex = component.get("color")
+        vertices = component.get("vertices", [])
+        indices = component.get("indices", [])
+        part_name = component.get("partName")
+
+        mesh_label = element_name
+        if total_components > 1:
+            mesh_label += f"_{part_name or comp_type}_{comp_idx + 1}"
+
+        print(
+            f"[SITE MESH]   Component {comp_idx + 1}/{total_components}: "
+            f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
+        )
+
+        if progress_callback and (comp_idx % 5 == 0 or comp_idx == total_components - 1):
+            progress_callback(
+                comp_idx + 1,
+                total_components,
+                f"Processing component {comp_idx + 1}/{total_components}: {comp_type}",
+            )
+
+        if len(vertices) < 3 or len(indices) < 3:
+            print(f"[SITE MESH]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            continue
+
+        element = create_road_mesh_element(
+            ifc_file,
+            storey,
+            context,
+            mesh_label,
+            component,
+            origin_tuple,
+            coordinate_mode,
+            color_hex,
+            comp_type,
+        )
+        if not element:
+            print(f"[SITE MESH]   ⚠️ Failed to create element: {mesh_label}")
+            continue
+
+        try:
+            pset_values = {
+                "ElementId": element_id,
+                "ElementType": element_type,
+                "ComponentType": comp_type,
+            }
+            for key, value in metadata.items():
+                # Pset property names are conventionally PascalCase.
+                pset_values[str(key)[:1].upper() + str(key)[1:]] = value
+            add_custom_property_set(ifc_file, element, "Pset_InfraGridSiteElement", pset_values)
+        except Exception as e:
+            print(f"[SITE MESH]   ⚠️ WARNING: Could not apply site element properties: {e}")
+
+        created_elements.append(element)
+        print(f"[SITE MESH]   ✅ Created {comp_type} element: {mesh_label}")
+
+    print(f"[SITE MESH]   ✅ Element created with {len(created_elements)} mesh parts")
+    return created_elements
+
+
 def export_chambers_to_ifc(
     chambers_data,
     output_path,
@@ -5606,6 +5836,8 @@ def export_chambers_to_ifc(
     roads_data=None,
     hardstandings_data=None,
     drainage_elements_data=None,
+    retaining_walls_data=None,
+    site_mesh_elements_data=None,
     coordinate_mode="absolute",
     progress_callback=None,
 ):
@@ -5632,9 +5864,11 @@ def export_chambers_to_ifc(
         road_count = len(roads_data) if roads_data else 0
         hardstanding_count = len(hardstandings_data) if hardstandings_data else 0
         drainage_count = len(drainage_elements_data) if drainage_elements_data else 0
-        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count
+        retaining_wall_count = len(retaining_walls_data) if retaining_walls_data else 0
+        site_mesh_count = len(site_mesh_elements_data) if site_mesh_elements_data else 0
+        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count + retaining_wall_count + site_mesh_count
         print(
-            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, and {drainage_count} drainage elements"
+            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, {drainage_count} drainage elements, {retaining_wall_count} retaining walls, and {site_mesh_count} site mesh elements"
         )
 
         coordinate_mode = (coordinate_mode or "absolute").lower()
@@ -5962,6 +6196,101 @@ def export_chambers_to_ifc(
             print(f"[EXPORT] Drainage components created: {drainage_components_created}")
             print(f"[EXPORT] ═══════════════════════════\n")
 
+        # Export retaining walls (concrete/RC, sheet pile, secant pile)
+        retaining_walls_created = 0
+        retaining_wall_components_created = 0
+        if retaining_walls_data:
+            print(f"\n[EXPORT] ═══ RETAINING WALLS ═══")
+            print(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
+
+            for index, wall in enumerate(retaining_walls_data, start=1):
+                wall_name = wall.get("name", wall.get("wallId", "RetainingWall"))
+                wall_start_item = current_item
+
+                def wall_progress_callback(comp_idx, comp_total, comp_message):
+                    if progress_callback:
+                        progress_callback(
+                            "retaining_walls",
+                            wall_start_item,
+                            total_items,
+                            f"Retaining wall {index}/{retaining_wall_count}: {comp_message} ({comp_idx}/{comp_total} components)",
+                        )
+
+                result = add_retaining_wall_to_ifc(
+                    ifc_file,
+                    storey,
+                    context,
+                    wall,
+                    project_coords,
+                    coordinate_mode=coordinate_mode,
+                    origin_tuple=origin_tuple,
+                    progress_callback=wall_progress_callback if progress_callback else None,
+                )
+                if result:
+                    retaining_walls_created += 1
+                    retaining_wall_components_created += len(result)
+                current_item += 1
+                if progress_callback:
+                    progress_callback(
+                        "retaining_walls",
+                        current_item,
+                        total_items,
+                        f"Completed retaining wall {index}/{retaining_wall_count}",
+                    )
+
+            print(f"\n[EXPORT] ═══ RETAINING WALL SUMMARY ═══")
+            print(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
+            print(f"[EXPORT] Retaining walls created: {retaining_walls_created}")
+            print(f"[EXPORT] Retaining wall components created: {retaining_wall_components_created}")
+            print(f"[EXPORT] ═══════════════════════════════\n")
+
+        # Export generic site mesh elements (buildings, ducts, cable trays, terrain)
+        site_mesh_created = 0
+        site_mesh_components_created = 0
+        if site_mesh_elements_data:
+            print(f"\n[EXPORT] ═══ SITE MESH ELEMENTS ═══")
+            print(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
+
+            for index, element in enumerate(site_mesh_elements_data, start=1):
+                site_mesh_start_item = current_item
+
+                def site_mesh_progress_callback(comp_idx, comp_total, comp_message):
+                    if progress_callback:
+                        progress_callback(
+                            "site_mesh",
+                            site_mesh_start_item,
+                            total_items,
+                            f"Site element {index}/{site_mesh_count}: {comp_message} ({comp_idx}/{comp_total} components)",
+                        )
+
+                result = add_site_mesh_element_to_ifc(
+                    ifc_file,
+                    storey,
+                    context,
+                    element,
+                    project_coords,
+                    coordinate_mode=coordinate_mode,
+                    origin_tuple=origin_tuple,
+                    progress_callback=site_mesh_progress_callback if progress_callback else None,
+                )
+                if result:
+                    site_mesh_created += 1
+                    site_mesh_components_created += len(result)
+                current_item += 1
+                if progress_callback:
+                    progress_callback(
+                        "site_mesh",
+                        current_item,
+                        total_items,
+                        f"Completed site element {index}/{site_mesh_count}",
+                    )
+
+            print(f"\n[EXPORT] ═══ SITE MESH SUMMARY ═══")
+            print(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
+            print(f"[EXPORT] Site mesh elements created: {site_mesh_created}")
+            print(f"[EXPORT] Site mesh components created: {site_mesh_components_created}")
+            print(f"[EXPORT] ═══════════════════════════\n")
+
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
         print(f"[EXPORT] Writing IFC to {output_path}")
@@ -5985,6 +6314,10 @@ def export_chambers_to_ifc(
             "hardstanding_components_count": hardstanding_components_created,
             "drainage_elements_count": drainage_count if drainage_elements_data else 0,
             "drainage_components_count": drainage_components_created if drainage_elements_data else 0,
+            "retaining_walls_count": retaining_wall_count,
+            "retaining_wall_components_count": retaining_wall_components_created,
+            "site_mesh_elements_count": site_mesh_count,
+            "site_mesh_components_count": site_mesh_components_created,
         }
 
     except Exception as error:
