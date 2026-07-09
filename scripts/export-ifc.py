@@ -2247,6 +2247,13 @@ def create_road_mesh_element(
     elif comp_type in ("building-walls", "building-roof", "building"):
         ifc_class = "IfcBuildingElementProxy"
         predefined_type = "NOTDEFINED"
+    elif comp_type in ("electrical-utility-body", "electrical-utility"):
+        # Manufacturer IFC/FBX/GLB electrical utilities (EV chargers, CCTV, etc.)
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "NOTDEFINED"
+    elif comp_type == "electrical-conduit-spur":
+        ifc_class = "IfcPipeSegment"
+        predefined_type = "RIGIDSEGMENT"
     elif comp_type == "duct":
         ifc_class = "IfcDuctSegment"
         predefined_type = "RIGIDSEGMENT"
@@ -2333,6 +2340,8 @@ def create_road_mesh_element(
         "building-walls", "building-roof", "building",
         "duct", "duct-hanger", "cable-tray", "cable-tray-hanger", "terrain",
         "pipe-flow-arrow", "pipe-gradient-stamp", "pipe-flow-sticker",
+        "chamber-level-sticker",
+        "electrical-utility-body", "electrical-utility", "electrical-conduit-spur",
     )
     if comp_type not in site_mesh_comp_types:
         try:
@@ -5748,6 +5757,9 @@ def add_site_mesh_element_to_ifc(
       pipe-flow-arrow    -> IfcBuildingElementProxy (embossed flow direction triangles)
       pipe-gradient-stamp -> IfcBuildingElementProxy (embossed gradient / diameter labels)
       pipe-flow-sticker  -> IfcBuildingElementProxy (combined sticker mesh fallback)
+      chamber-level-sticker -> IfcBuildingElementProxy (embossed IL/CL level labels)
+      electrical-utility -> IfcBuildingElementProxy (manufacturer IFC/FBX body)
+                           + IfcPipeSegment (conduit spur)
     """
     element_id = element_data.get("elementId", "SiteElement")
     element_name = element_data.get("name", element_id)
