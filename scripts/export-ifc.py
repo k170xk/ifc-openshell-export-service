@@ -14,6 +14,70 @@ from ifcopenshell.api import run as ifc_run
 
 DEFAULT_PROJECT_NAME = "InfraGrid3D Project"
 
+# Bridge catalogue mesh types. Mirrors BRIDGE_MESH_TYPES in
+# src/app/tools/bridgeSpanGeometry.ts — every entry is exported as a
+# triangulated solid, so adding one there means adding it here too.
+BRIDGE_COMP_TYPES = (
+    "bridge-deck",
+    "bridge-abutment",
+    "bridge-pier",
+    "bridge-upstand",
+    "bridge-railing",
+    "bridge-girder",
+    "bridge-girder-haunch",
+    "bridge-shear-key",
+    "bridge-cap",
+    "bridge-column",
+    "bridge-bearing",
+    "bridge-wingwall",
+    "bridge-foundation",
+    "bridge-blinding",
+    "bridge-pile",
+    "bridge-rebar",
+    # Non-girder structural systems.
+    "bridge-arch-rib",
+    "bridge-arch-tie",
+    "bridge-arch-fill",
+    "bridge-spandrel-column",
+    "bridge-spandrel-wall",
+    "bridge-springing",
+    "bridge-hanger",
+    "bridge-bracing",
+    "bridge-truss-chord",
+    "bridge-truss-web",
+    "bridge-portal-brace",
+    "bridge-cross-girder",
+    "bridge-pylon",
+    "bridge-tower",
+    "bridge-stay",
+    "bridge-main-cable",
+    "bridge-anchorage",
+    "bridge-box-girder",
+    "bridge-box-segment-joint",
+    "bridge-diaphragm",
+    "bridge-tendon",
+    "bridge-culvert",
+    "bridge-headwall",
+    # Furniture.
+    "bridge-parapet",
+    "bridge-parapet-plinth",
+    "bridge-parapet-post",
+    "bridge-parapet-rail",
+    "bridge-parapet-handrail",
+    "bridge-parapet-infill",
+    "bridge-parapet-barrier",
+    "bridge-expansion-joint",
+    "bridge-waterproofing",
+    "bridge-surfacing",
+    "bridge-gully",
+    "bridge-downpipe",
+    "bridge-carrier-drain",
+    "bridge-service-duct",
+    "bridge-cable-trough",
+    "bridge-stiffener",
+    "bridge-approach-slab",
+)
+
 
 UNIT_MAPPING = {
     "meters": {"is_metric": True, "raw": "METERS"},
@@ -2008,6 +2072,13 @@ def add_road_to_ifc(
             "road-marking" in source_type or source_type == "raised-table-ramp-arrow"
         ):
             comp_type = "road-marking"
+        # Live Render accepts `custom` for unknown mesh types; identify grading by source/feature.
+        if (
+            comp_type == "grading"
+            or component.get("featureType") == "grading"
+            or source_type in ("road-grading-skirt", "hardstanding-grading", "grading-skirt")
+        ):
+            comp_type = "grading"
         comp_side = component.get("side")
         color_hex = component.get("color")
         vertices = component.get("vertices", [])
@@ -2020,12 +2091,16 @@ def add_road_to_ifc(
             element_name += f"_{component.get('wideningGroupId')}"
         if component.get("islandId"):
             element_name += f"_{component.get('islandId')}"
-        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "kerb", "bedding", "road-marking", "raised-table"):
+        if component.get("sourceType") and comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "kerb", "bedding", "road-marking", "raised-table", "grading") + BRIDGE_COMP_TYPES:
             element_name += f"_{component.get('sourceType')}"
         if component.get("markingId"):
             element_name += f"_{component.get('markingId')}"
         if component.get("raisedTableId"):
             element_name += f"_{component.get('raisedTableId')}"
+        if component.get("bridgeSpanId"):
+            element_name += f"_{component.get('bridgeSpanId')}"
+        if component.get("gullyId"):
+            element_name += f"_{component.get('gullyId')}"
         if component.get("featureId"):
             element_name += f"_{component.get('featureId')}"
         
@@ -2064,7 +2139,7 @@ def add_road_to_ifc(
             if element:
                 created_elements.append(element)
                 
-        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "raised-table"):
+        elif comp_type in ("footpath", "verge", "swale", "ditch", "wall", "fence", "hedge", "custom", "widening", "island", "raised-table", "grading", "gully", "gully-connection") + BRIDGE_COMP_TYPES:
             # Offset features and widening fold strips are exported as triangulated meshes.
             # They preserve exact geometry including crossfalls, profiles, and layers
             vertices = component.get("vertices", [])
@@ -2241,12 +2316,167 @@ def create_road_mesh_element(
         # sitting on the carriageway. Export as a paving slab for viewer visibility.
         ifc_class = "IfcSlab"
         predefined_type = "PAVING"
+    elif comp_type == "bridge-deck":
+        ifc_class = "IfcSlab"
+        predefined_type = "FLOOR"
+    elif comp_type in ("bridge-abutment", "bridge-upstand", "bridge-wingwall"):
+        ifc_class = "IfcWall"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-pier", "bridge-column"):
+        ifc_class = "IfcColumn"
+        predefined_type = "COLUMN"
+    elif comp_type == "bridge-railing":
+        ifc_class = "IfcRailing"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-girder", "bridge-cap"):
+        # Girders and cap beams are load-carrying linear members.
+        ifc_class = "IfcBeam"
+        predefined_type = "BEAM"
+    elif comp_type in ("bridge-girder-haunch", "bridge-shear-key"):
+        # Packing and stitch concrete: modelled solids with no structural role
+        # of their own, so they ride as generic members rather than beams.
+        ifc_class = "IfcMember"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "bridge-bearing":
+        ifc_class = "IfcMechanicalFastener"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-foundation", "bridge-blinding"):
+        ifc_class = "IfcFooting"
+        predefined_type = "PAD_FOOTING"
+    elif comp_type == "bridge-pile":
+        ifc_class = "IfcPile"
+        predefined_type = "BORED"
+    elif comp_type == "bridge-rebar":
+        ifc_class = "IfcReinforcingBar"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "bridge-tendon":
+        ifc_class = "IfcTendon"
+        predefined_type = "STRAND"
+    elif comp_type in ("bridge-arch-rib", "bridge-arch-tie", "bridge-cross-girder", "bridge-box-girder"):
+        # Primary load-carrying linear members of the non-girder systems.
+        ifc_class = "IfcBeam"
+        predefined_type = "BEAM"
+    elif comp_type in ("bridge-truss-chord", "bridge-truss-web", "bridge-bracing", "bridge-portal-brace", "bridge-stiffener"):
+        ifc_class = "IfcMember"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-pylon", "bridge-tower", "bridge-spandrel-column"):
+        ifc_class = "IfcColumn"
+        predefined_type = "COLUMN"
+    elif comp_type in ("bridge-hanger", "bridge-stay", "bridge-main-cable"):
+        # Tension elements. IfcTendon is the closest IFC4 fit for a stay or
+        # hanger; the property set carries the diameter and arrangement.
+        ifc_class = "IfcTendon"
+        predefined_type = "BAR"
+    elif comp_type in ("bridge-spandrel-wall", "bridge-headwall", "bridge-culvert"):
+        ifc_class = "IfcWall"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-springing", "bridge-anchorage"):
+        ifc_class = "IfcFooting"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "bridge-arch-fill":
+        # IfcEarthworksFill is IFC4x3 only; this file is IFC4, so spandrel fill
+        # rides as a proxy rather than being silently dropped.
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "bridge-diaphragm":
+        ifc_class = "IfcPlate"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "bridge-parapet":
+        ifc_class = "IfcRailing"
+        predefined_type = "GUARDRAIL"
+    elif comp_type == "bridge-parapet-plinth":
+        ifc_class = "IfcWall"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-parapet-rail", "bridge-parapet-handrail", "bridge-parapet-barrier"):
+        # Rails, handrails and vehicle containment run along the deck edge:
+        # part of the parapet system, so they stay railings for schedules.
+        ifc_class = "IfcRailing"
+        predefined_type = "HANDRAIL" if comp_type == "bridge-parapet-handrail" else "GUARDRAIL"
+    elif comp_type in ("bridge-parapet-post", "bridge-parapet-infill"):
+        # Posts and mesh / panel infill are secondary members of the parapet.
+        ifc_class = "IfcMember"
+        predefined_type = "POST" if comp_type == "bridge-parapet-post" else "USERDEFINED"
+    elif comp_type == "bridge-box-segment-joint":
+        # Match-cast segment joint between precast box units.
+        ifc_class = "IfcMember"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "gully":
+        # Road gully grate + pot: a drainage chamber unit at the kerb line.
+        ifc_class = "IfcDistributionChamberElement"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "gully-connection":
+        # Lateral connection from the gully invert to the storm main.
+        ifc_class = "IfcPipeSegment"
+        predefined_type = "RIGIDSEGMENT"
+    elif comp_type == "bridge-expansion-joint":
+        # IfcBearing arrived in IFC4x2; a joint assembly maps to the same
+        # fastener class the elastomeric bearings use.
+        ifc_class = "IfcMechanicalFastener"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-waterproofing", "bridge-surfacing"):
+        ifc_class = "IfcCovering"
+        predefined_type = "MEMBRANE" if comp_type == "bridge-waterproofing" else "FLOORING"
+    elif comp_type == "bridge-gully":
+        ifc_class = "IfcDistributionChamberElement"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("bridge-downpipe", "bridge-carrier-drain", "bridge-service-duct"):
+        ifc_class = "IfcPipeSegment"
+        predefined_type = "RIGIDSEGMENT"
+    elif comp_type == "bridge-cable-trough":
+        ifc_class = "IfcCableCarrierSegment"
+        predefined_type = "CABLETRAYSEGMENT"
+    elif comp_type == "bridge-approach-slab":
+        ifc_class = "IfcSlab"
+        predefined_type = "FLOOR"
+    elif comp_type == "grading":
+        # Cut/fill skirts. IfcSlab + PAVING matches other site surfaces so viewers show them.
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
     elif comp_type == "wall":
         ifc_class = "IfcWall"
         predefined_type = "USERDEFINED"
+    elif comp_type == "wall-stem":
+        # The retaining structure itself.
+        ifc_class = "IfcWall"
+        predefined_type = "RETAININGWALL"
+    elif comp_type == "wall-footing":
+        # A spread footing is a foundation, not part of the wall: anyone querying
+        # foundations or ordering the blinding pour needs to find it as one.
+        ifc_class = "IfcFooting"
+        predefined_type = "STRIP_FOOTING"
+    elif comp_type == "wall-pile":
+        ifc_class = "IfcPile"
+        predefined_type = "BORED"
+    elif comp_type == "wall-coping":
+        # Capping beam / coping over the crest.
+        ifc_class = "IfcBeam"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "wall-drainage":
+        ifc_class = "IfcPipeSegment"
+        predefined_type = "RIGIDSEGMENT"
     elif comp_type in ("building-walls", "building-roof", "building"):
         ifc_class = "IfcBuildingElementProxy"
         predefined_type = "NOTDEFINED"
+    elif comp_type in ("parking-marking", "parking-island"):
+        # Parking V2: painted bay markings and planted/paved islands ride as
+        # paving slabs so every viewer shows them alongside the hardstanding.
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
+    elif comp_type == "parking-island-kerb":
+        ifc_class = "IfcSlab"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "parking-lighting-column":
+        ifc_class = "IfcLightFixture"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "parking-ev-charger":
+        ifc_class = "IfcElectricDistributionBoard"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("parking-wheel-stop", "parking-bollard", "parking-sign", "parking-furniture"):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "NOTDEFINED"
+    elif comp_type == "parking-tree":
+        ifc_class = "IfcGeographicElement"
+        predefined_type = "USERDEFINED"
     elif comp_type in ("electrical-utility-body", "electrical-utility"):
         # Manufacturer IFC/FBX/GLB electrical utilities (EV chargers, CCTV, etc.)
         ifc_class = "IfcBuildingElementProxy"
@@ -2353,10 +2583,50 @@ def create_road_mesh_element(
                 "FeatureType": component.get("featureType"),
                 "MarkingId": component.get("markingId"),
                 "RaisedTableId": component.get("raisedTableId"),
+                "BridgeSpanId": component.get("bridgeSpanId"),
+                "StartChainage": component.get("startChainage"),
+                "EndChainage": component.get("endChainage"),
+                "DeckDepth": component.get("deckDepth"),
+                "SoffitName": component.get("soffitName"),
+                "SoffitLevel": component.get("soffitLevel"),
+                "FoundingLevel": component.get("foundingLevel"),
                 "WideningGroupId": component.get("wideningGroupId"),
                 "WideningPreset": component.get("wideningPreset"),
                 "RelatedWideningGroupIds": component.get("relatedWideningGroupIds", []),
             })
+            if (
+                comp_type == "grading"
+                or component.get("featureType") == "grading"
+                or component.get("gradingSteps")
+                or component.get("gradingRatio") is not None
+            ):
+                grading_steps = component.get("gradingSteps")
+                add_custom_property_set(ifc_file, road_element, "Pset_InfraGridGrading", {
+                    "Ratio": component.get("gradingRatio"),
+                    "Direction": component.get("gradingDirection"),
+                    "MaxDistance": component.get("gradingMaxDistance"),
+                    "SteppedInterface": component.get("steppedInterface"),
+                    "Steps": json.dumps(grading_steps) if grading_steps else None,
+                    "StepCount": len(grading_steps) if isinstance(grading_steps, list) else None,
+                })
+            if comp_type in BRIDGE_COMP_TYPES:
+                add_custom_property_set(ifc_file, road_element, "Pset_InfraGridBridgeElement", {
+                    "DeckRecipe": component.get("bridgeDeckRecipe"),
+                    "Material": component.get("bridgeMaterial"),
+                    "SupportId": component.get("bridgeSupportId"),
+                    "SupportKind": component.get("bridgeSupportKind"),
+                    "GirderSection": component.get("bridgeGirderSection"),
+                    "GirderIndex": component.get("bridgeGirderIndex"),
+                    "FoundationType": component.get("bridgeFoundationType"),
+                    "PileKind": component.get("bridgePileKind"),
+                    "PileCount": component.get("bridgePileCount"),
+                    "PileDiameterMm": component.get("bridgePileDiameterMm"),
+                    "PileLengthM": component.get("bridgePileLengthM"),
+                    "RebarSetId": component.get("bridgeRebarSetId"),
+                    "RebarDiameterMm": component.get("bridgeRebarDiameterMm"),
+                    "RebarSpacingMm": component.get("bridgeRebarSpacingMm"),
+                    "BarCount": component.get("bridgeBarCount"),
+                })
         except Exception as e:
             print(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
     
@@ -5494,6 +5764,7 @@ def add_hardstanding_to_ifc(
         "kerb": "kerb",
         "bedding": "bedding",
         "haunch": "haunch",
+        "grading": "grading",
     }
 
     for comp_idx, component in enumerate(components):
@@ -5639,11 +5910,16 @@ def add_retaining_wall_to_ifc(
     origin_tuple=None,
     progress_callback=None,
 ):
-    """Add a retaining wall (concrete/RC, sheet pile, or secant pile) to IFC.
+    """Add a retaining wall run to IFC.
 
-    Each wall arrives as one or more triangulated mesh components (stem +
-    footing + cap + piles merged) and is exported as IfcWall with a
-    Pset_InfraGridRetainingWall property set carrying the design parameters.
+    A wall arrives as one triangulated component per structural part — stem,
+    footing, coping, piles, weep holes — each exported as its own IFC class
+    (IfcWall, IfcFooting, IfcBeam, IfcPile, IfcPipeSegment) so a receiving model
+    can tell a foundation from the wall standing on it.
+
+    Every part carries the run's Pset_InfraGridRetainingWall. Heights and
+    thicknesses in it are ranges and integrals over the run, not single figures:
+    a wall following ground has a different section at every station.
     """
     wall_id = wall_data.get("wallId", "RetainingWall")
     wall_name = wall_data.get("name", wall_id)
@@ -5663,13 +5939,14 @@ def add_retaining_wall_to_ifc(
         vertices = component.get("vertices", [])
         indices = component.get("indices", [])
         part_name = component.get("partName")
+        comp_type = component.get("type", "wall-stem")
 
         mesh_label = wall_name
         if part_name and total_components > 1:
             mesh_label += f"_{part_name}"
 
         print(
-            f"[RETAINING WALL]   Component {comp_idx + 1}/{total_components}: "
+            f"[RETAINING WALL]   Component {comp_idx + 1}/{total_components} ({comp_type}): "
             f"{len(vertices)} vertices, {len(indices)} indices"
         )
 
@@ -5684,7 +5961,9 @@ def add_retaining_wall_to_ifc(
             print(f"[RETAINING WALL]   ⚠️ Skipping component: insufficient geometry")
             continue
 
-        # comp_type "wall" maps to IfcWall in create_road_mesh_element.
+        # Each part maps to its own IFC class in create_road_mesh_element:
+        # wall-stem → IfcWall, wall-footing → IfcFooting, wall-pile → IfcPile,
+        # wall-coping → IfcBeam, wall-drainage → IfcPipeSegment.
         element = create_road_mesh_element(
             ifc_file,
             storey,
@@ -5694,7 +5973,7 @@ def add_retaining_wall_to_ifc(
             origin_tuple,
             coordinate_mode,
             color_hex,
-            "wall",
+            comp_type,
         )
         if not element:
             print(f"[RETAINING WALL]   ⚠️ Failed to create element: {mesh_label}")
@@ -5704,34 +5983,41 @@ def add_retaining_wall_to_ifc(
             add_custom_property_set(ifc_file, element, "Pset_InfraGridRetainingWall", {
                 "WallId": wall_id,
                 "RetainingWallType": wall_type,
-                "RetainedSide": metadata.get("retainedSide"),
+                "Part": comp_type,
+                "Facing": metadata.get("facing"),
+                "OwnerId": metadata.get("ownerId"),
                 "LengthM": metadata.get("lengthM"),
-                "HeightM": metadata.get("heightM"),
-                "ThicknessM": metadata.get("thicknessM"),
-                "BaseElevationM": metadata.get("baseElevationM"),
-                "EmbedmentDepthM": metadata.get("embedmentDepthM"),
-                "FootingWidthM": metadata.get("footingWidthM"),
-                "FootingThicknessM": metadata.get("footingThicknessM"),
-                "ToeWidthM": metadata.get("toeWidthM"),
-                "HeelWidthM": metadata.get("heelWidthM"),
+                "FaceAreaM2": metadata.get("faceAreaM2"),
+                "MaxHeightM": metadata.get("maxHeightM"),
+                "MeanHeightM": metadata.get("meanHeightM"),
+                "ConcreteVolumeM3": metadata.get("concreteVolumeM3"),
+                "StemVolumeM3": metadata.get("stemVolumeM3"),
+                "FootingVolumeM3": metadata.get("footingVolumeM3"),
+                "CopingVolumeM3": metadata.get("copingVolumeM3"),
+                "CrestLevelStartM": metadata.get("crestLevelStartM"),
+                "CrestLevelEndM": metadata.get("crestLevelEndM"),
+                "MaxCrestLevelM": metadata.get("maxCrestLevelM"),
+                "MinToeLevelM": metadata.get("minToeLevelM"),
+                "MaxEmbedmentM": metadata.get("maxEmbedmentM"),
+                "MinStemThicknessM": metadata.get("minStemThicknessM"),
+                "MaxStemThicknessM": metadata.get("maxStemThicknessM"),
+                "MaxFootingWidthM": metadata.get("maxFootingWidthM"),
+                "MaxFootingThicknessM": metadata.get("maxFootingThicknessM"),
+                "MaxToeWidthM": metadata.get("maxToeWidthM"),
+                "MaxHeelWidthM": metadata.get("maxHeelWidthM"),
                 "BatterRatio": metadata.get("batterRatio"),
-                "CapHeightM": metadata.get("capHeightM"),
-                "CapOverhangM": metadata.get("capOverhangM"),
+                "PileDiameterM": metadata.get("pileDiameterM"),
+                "PileSpacingM": metadata.get("pileSpacingM"),
+                "PileCount": metadata.get("pileCount"),
                 "DrainageEnabled": metadata.get("drainageEnabled"),
                 "WeepHoleSpacingM": metadata.get("weepHoleSpacingM"),
-                "MalePileDiameterM": metadata.get("malePileDiameterM"),
-                "FemalePileDiameterM": metadata.get("femalePileDiameterM"),
-                "PileSpacingM": metadata.get("pileSpacingM"),
-                "SheetPilePitchM": metadata.get("sheetPilePitchM"),
-                "SheetPileDepthM": metadata.get("sheetPileDepthM"),
-                "SheetPileThicknessM": metadata.get("sheetPileThicknessM"),
-                "MaterialPreset": metadata.get("materialPreset"),
+                "WeepHoleCount": metadata.get("weepHoleCount"),
             })
         except Exception as e:
             print(f"[RETAINING WALL]   ⚠️ WARNING: Could not apply wall properties: {e}")
 
         created_elements.append(element)
-        print(f"[RETAINING WALL]   ✅ Created wall element: {mesh_label}")
+        print(f"[RETAINING WALL]   ✅ Created wall element: {mesh_label} ({comp_type})")
 
     print(f"[RETAINING WALL]   ✅ Wall created with {len(created_elements)} mesh parts")
     return created_elements
@@ -5760,6 +6046,9 @@ def add_site_mesh_element_to_ifc(
       chamber-level-sticker -> IfcBuildingElementProxy (embossed IL/CL level labels)
       electrical-utility -> IfcBuildingElementProxy (manufacturer IFC/FBX body)
                            + IfcPipeSegment (conduit spur)
+      parking-lot        -> IfcSlab PAVING (markings, islands, kerbs)
+                           + IfcLightFixture / IfcElectricDistributionBoard /
+                             IfcBuildingElementProxy furniture, IfcGeographicElement trees
     """
     element_id = element_data.get("elementId", "SiteElement")
     element_name = element_data.get("name", element_id)
