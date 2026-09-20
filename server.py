@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 import ifcopenshell
+import gzip
+import io
 import json
 import os
 import tempfile
@@ -23,14 +25,39 @@ add_light_connection_to_ifc = export_ifc_module.add_light_connection_to_ifc
 
 app = Flask(__name__)
 CORS(app)
+# Large sites (tens of km of roads) post hundreds of MB of JSON, gzip'd to a fraction. No Flask cap.
+app.config["MAX_CONTENT_LENGTH"] = None
 
 # In-memory progress store (keyed by export_id)
 export_progress = {}
 export_lock = threading.Lock()
 
+GZIP_MAGIC = b"\x1f\x8b"
+
+
+def read_json_body():
+    """Read the request body as JSON, transparently decompressing gzip.
+
+    The app sends `Content-Encoding: gzip`; the magic-byte sniff also covers a
+    proxy that strips the header, and plain JSON from older clients.
+    """
+    raw = request.get_data(cache=False)
+    if not raw:
+        return None
+    encoding = (request.headers.get("Content-Encoding") or "").lower()
+    if raw[:2] == GZIP_MAGIC or "gzip" in encoding:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+            data = json.load(gz)
+    else:
+        data = json.loads(raw)
+    del raw
+    return data
+
+
 @app.route("/health")
 def health():
-    return jsonify({"status": "healthy"}), 200
+    # Capability flags let the app pick an upload path the deployed build understands.
+    return jsonify({"status": "healthy", "gzipUpload": True}), 200
 
 @app.route("/")
 def root():
@@ -206,7 +233,10 @@ def get_export_progress(export_id):
     def generate():
         last_timestamp = 0
         start_time = time.time()
-        timeout = 300  # 5 minute timeout
+        last_sent = start_time
+        # Large exports run for many minutes; Render's edge allows 100 min per request.
+        timeout = 100 * 60
+        keepalive_every = 15
         try:
             while True:
                 # Check timeout
@@ -221,11 +251,16 @@ def get_export_progress(export_id):
                     # Only send if updated
                     if progress.get("timestamp", 0) > last_timestamp:
                         last_timestamp = progress.get("timestamp", 0)
+                        last_sent = time.time()
                         yield f"data: {json.dumps(progress)}\n\n"
                         
                         # Stop if complete or error
                         if progress.get("type") in ("complete", "error"):
                             break
+                    elif time.time() - last_sent > keepalive_every:
+                        # Proxies drop idle streams; re-send the current step as a heartbeat.
+                        last_sent = time.time()
+                        yield f"data: {json.dumps({**progress, 'keepalive': True})}\n\n"
                 else:
                     # Send initial message if no progress yet
                     if last_timestamp == 0:
@@ -281,13 +316,23 @@ def export_chambers():
     temp_path = None
     export_id = None
     try:
-        data = request.get_json()
+        # The app sends the id as a header too, so progress can start before the
+        # (possibly very large) body is decompressed and parsed.
+        header_export_id = request.headers.get("X-Export-Id")
+        if header_export_id:
+            update_progress(header_export_id, {
+                "type": "progress",
+                "message": "Reading export payload...",
+                "progress": 2,
+            })
+
+        data = read_json_body()
         
         if not data:
             return jsonify({"success": False, "error": "No JSON data provided"}), 400
         
         # Get or generate export ID for progress tracking
-        export_id = data.get("exportId") or str(uuid.uuid4())
+        export_id = data.get("exportId") or header_export_id or str(uuid.uuid4())
         
         chambers = data.get("chambers", [])
         pipes = data.get("pipes", [])
