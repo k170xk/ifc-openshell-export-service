@@ -42,6 +42,52 @@ def log(*args, **kwargs):
 # container by flush_container_assignments() right before the file is written.
 # Output is identical (same relationship, same relative placements).
 _pending_containment = {}
+# (id(ifc_file), "#rrggbb") -> IfcPresentationStyleAssignment, see apply_color_to_element.
+_style_cache = {}
+
+
+def _drop_style_cache(ifc_file):
+    file_key = id(ifc_file)
+    for key in [k for k in _style_cache if k[0] == file_key]:
+        del _style_cache[key]
+    _origin_placements.pop(file_key, None)
+
+
+# id(ifc_file) -> shared identity IfcLocalPlacement for mesh elements authored in
+# absolute coordinates. IFC4 lets one placement place many products
+# (IfcObjectPlacement.PlacesObject is a SET), and this saves five entities per
+# element on large sites. Dropped with the style cache.
+_origin_placements = {}
+
+
+def _origin_placement(ifc_file):
+    placement = _origin_placements.get(id(ifc_file))
+    if placement is None:
+        placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
+        z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
+        x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
+        placement = ifc_file.createIfcLocalPlacement(
+            None,
+            ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir),
+        )
+        _origin_placements[id(ifc_file)] = placement
+    return placement
+
+
+def _unshare_placement(ifc_file, product):
+    """Give a product its own copy of a shared placement before an API call that may rewrite it."""
+    placement = getattr(product, "ObjectPlacement", None)
+    if placement is None or len(placement.PlacesObject) <= 1:
+        return
+    axis = placement.RelativePlacement
+    product.ObjectPlacement = ifc_file.createIfcLocalPlacement(
+        placement.PlacementRelTo,
+        ifc_file.createIfcAxis2Placement3D(
+            ifc_file.createIfcCartesianPoint(tuple(axis.Location.Coordinates)),
+            ifc_file.createIfcDirection(tuple(axis.Axis.DirectionRatios)) if axis.Axis else None,
+            ifc_file.createIfcDirection(tuple(axis.RefDirection.DirectionRatios)) if axis.RefDirection else None,
+        ),
+    )
 
 
 def assign_to_container(ifc_file, products, relating_structure):
@@ -60,6 +106,7 @@ def discard_container_assignments(ifc_file):
     """Drop queued containment after a failed export so nothing leaks in a long-lived process."""
     if ifc_file is not None:
         _pending_containment.pop(id(ifc_file), None)
+        _drop_style_cache(ifc_file)
 
 
 def _placement_is_identity(structure):
@@ -122,11 +169,16 @@ def _contain_directly(ifc_file, structure, products):
 
 def flush_container_assignments(ifc_file):
     """Write one IfcRelContainedInSpatialStructure per container for queued products."""
+    _drop_style_cache(ifc_file)
     per_file = _pending_containment.pop(id(ifc_file), None)
     if not per_file:
         return 0
     assigned = 0
     for structure, products in per_file.values():
+        # IFC4 CorrectPredefinedType: a USERDEFINED PredefinedType needs an ObjectType.
+        for product in products:
+            if getattr(product, "PredefinedType", None) == "USERDEFINED" and not getattr(product, "ObjectType", None):
+                product.ObjectType = product.Name or product.is_a()[3:]
         # Anything already contained elsewhere needs the API's un-assign logic.
         fresh = [p for p in products if not p.ContainedInStructure]
         moved = [p for p in products if p.ContainedInStructure]
@@ -135,6 +187,9 @@ def flush_container_assignments(ifc_file):
         elif fresh:
             moved = fresh + moved
         if moved:
+            # The API rewrites each product's placement in place; never let it touch a shared one.
+            for product in moved:
+                _unshare_placement(ifc_file, product)
             ifc_run(
                 "spatial.assign_container",
                 file=ifc_file,
@@ -260,37 +315,41 @@ def apply_color_to_element(ifc_file, element, color_hex):
         return
     
     log(f"[COLOR] Applying color {color_hex} (RGB: {rgb}) to {element.Name}")
-    
-    # Create surface color
-    surface_color = ifc_file.createIfcColourRgb(None, rgb[0], rgb[1], rgb[2])
-    
-    # Create rendering style
-    rendering_style = ifc_file.createIfcSurfaceStyleRendering(
-        surface_color,  # SurfaceColour
-        None,  # Transparency
-        None,  # DiffuseColour
-        None,  # TransmissionColour
-        None,  # DiffuseTransmissionColour
-        None,  # ReflectionColour
-        None,  # SpecularColour
-        None,  # SpecularHighlight
-        "FLAT"  # ReflectanceMethod
-    )
-    
-    # Create surface style
-    surface_style = ifc_file.createIfcSurfaceStyle(
-        None,  # Name
-        "BOTH",  # Side (POSITIVE, NEGATIVE, BOTH)
-        [rendering_style]  # Styles
-    )
-    
+
+    # One IfcSurfaceStyle (+ colour, rendering, assignment) per distinct colour
+    # per file. Large sites reuse a handful of colours across tens of thousands
+    # of elements; recreating the four style entities per element was ~20% of
+    # the model's entity count. Cache is dropped in flush/discard.
+    cache_key = (id(ifc_file), color_hex.strip().lower())
+    style_assignment = _style_cache.get(cache_key)
+    if style_assignment is None:
+        surface_color = ifc_file.createIfcColourRgb(None, rgb[0], rgb[1], rgb[2])
+        rendering_style = ifc_file.createIfcSurfaceStyleRendering(
+            surface_color,  # SurfaceColour
+            None,  # Transparency
+            None,  # DiffuseColour
+            None,  # TransmissionColour
+            None,  # DiffuseTransmissionColour
+            None,  # ReflectionColour
+            None,  # SpecularColour
+            None,  # SpecularHighlight
+            "FLAT"  # ReflectanceMethod
+        )
+        surface_style = ifc_file.createIfcSurfaceStyle(
+            None,  # Name
+            "BOTH",  # Side (POSITIVE, NEGATIVE, BOTH)
+            [rendering_style]  # Styles
+        )
+        style_assignment = ifc_file.createIfcPresentationStyleAssignment([surface_style])
+        _style_cache[cache_key] = style_assignment
+
     # Create styled item for the element's representation
     if hasattr(element, 'Representation') and element.Representation:
         for representation in element.Representation.Representations:
             for item in representation.Items:
                 ifc_file.createIfcStyledItem(
                     item,  # Item
-                    [ifc_file.createIfcPresentationStyleAssignment([surface_style])],  # Styles
+                    [style_assignment],  # Styles
                     None  # Name
                 )
 
@@ -2080,13 +2139,7 @@ def add_pipe_to_ifc(
     )
     
     # Set placement at origin (geometry is in absolute coordinates)
-    placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-    z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-    x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-    placement = ifc_file.createIfcLocalPlacement(
-        None,
-        ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-    )
+    placement = _origin_placement(ifc_file)
     pipe.ObjectPlacement = placement
     
     # Create shape representation with all extruded solids
@@ -2626,6 +2679,9 @@ def create_road_mesh_element(
             name=element_name,
             predefined_type=predefined_type,
         )
+        # IFC4 CorrectPredefinedType: USERDEFINED requires ObjectType.
+        if predefined_type == "USERDEFINED" and not getattr(road_element, "ObjectType", None):
+            road_element.ObjectType = comp_type
         log(f"[ROAD]     ✅ Created IFC element: {road_element}")
     except Exception as e:
         log(f"[ROAD]     ❌ ERROR creating IFC element: {e}")
@@ -2635,13 +2691,7 @@ def create_road_mesh_element(
     
     # Set placement at origin (geometry is in absolute coordinates)
     try:
-        placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-        z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-        x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-        placement = ifc_file.createIfcLocalPlacement(
-            None,
-            ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-        )
+        placement = _origin_placement(ifc_file)
         road_element.ObjectPlacement = placement
         road_element.Representation = product_shape
         log(f"[ROAD]     ✅ Set placement and representation")
@@ -2930,13 +2980,7 @@ def create_road_swept_element(
     )
     
     # Set placement at origin
-    placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-    z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-    x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-    placement = ifc_file.createIfcLocalPlacement(
-        None,
-        ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-    )
+    placement = _origin_placement(ifc_file)
     element.ObjectPlacement = placement
     element.Representation = product_shape
     
@@ -4081,13 +4125,7 @@ def add_light_connection_to_ifc(
     )
     
     # Set placement at origin (geometry is in absolute coordinates)
-    placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-    z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-    x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-    placement = ifc_file.createIfcLocalPlacement(
-        None,
-        ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-    )
+    placement = _origin_placement(ifc_file)
     conduit.ObjectPlacement = placement
     
     # Create shape representation with all extruded solids
@@ -5154,13 +5192,7 @@ def add_public_light_to_ifc(
             )
             
             # Set placement at origin (geometry is in absolute coordinates)
-            placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-            z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-            x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-            placement = ifc_file.createIfcLocalPlacement(
-                None,
-                ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-            )
+            placement = _origin_placement(ifc_file)
             sign_element.ObjectPlacement = placement
             
             # Create shape representation with main solids (plate, border, straps)
@@ -5712,13 +5744,7 @@ def add_public_light_to_ifc(
         )
         
         # Set placement at origin (geometry is in absolute coordinates)
-        placement_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
-        z_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0))
-        x_dir = ifc_file.createIfcDirection((1.0, 0.0, 0.0))
-        placement = ifc_file.createIfcLocalPlacement(
-            None,
-            ifc_file.createIfcAxis2Placement3D(placement_point, z_dir, x_dir)
-        )
+        placement = _origin_placement(ifc_file)
         light_element.ObjectPlacement = placement
         
         # Create shape representation with all solids
