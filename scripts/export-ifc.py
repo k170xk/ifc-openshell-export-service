@@ -4,6 +4,7 @@ IFC Export Service using IfcOpenShell
 Receives chamber data via JSON and exports to IFC file
 """
 
+import os
 import sys
 import json
 import math
@@ -13,6 +14,23 @@ import ifcopenshell
 from ifcopenshell.api import run as ifc_run
 
 DEFAULT_PROJECT_NAME = "InfraGrid3D Project"
+
+# Per-element tracing is ~12 lines per component. A large site is tens of
+# thousands of components, and every line goes through the host's log pipe,
+# so tracing is opt-in. Warnings, errors and [EXPORT] summaries always print.
+IFC_EXPORT_VERBOSE = os.environ.get("IFC_EXPORT_VERBOSE", "").strip().lower() not in ("", "0", "false", "no")
+_ALWAYS_LOG_MARKERS = ("⚠️", "❌", "Error", "ERROR", "error", "Warning", "WARN", "Traceback", "[EXPORT]", "[API]")
+
+
+def log(*args, **kwargs):
+    """print() that drops per-element tracing unless IFC_EXPORT_VERBOSE is set."""
+    if IFC_EXPORT_VERBOSE:
+        print(*args, **kwargs)
+        return
+    if args:
+        first = str(args[0])
+        if any(marker in first for marker in _ALWAYS_LOG_MARKERS):
+            print(*args, **kwargs)
 
 # Bridge catalogue mesh types. Mirrors BRIDGE_MESH_TYPES in
 # src/app/tools/bridgeSpanGeometry.ts — every entry is exported as a
@@ -114,7 +132,7 @@ def hex_to_rgb(hex_color):
         b = int(hex_color[4:6], 16) / 255.0
         return (r, g, b)
     except (ValueError, IndexError):
-        print(f"[COLOR] Warning: Invalid hex color '{hex_color}', using default")
+        log(f"[COLOR] Warning: Invalid hex color '{hex_color}', using default")
         return None
 
 
@@ -129,7 +147,7 @@ def apply_color_to_element(ifc_file, element, color_hex):
     if not rgb:
         return
     
-    print(f"[COLOR] Applying color {color_hex} (RGB: {rgb}) to {element.Name}")
+    log(f"[COLOR] Applying color {color_hex} (RGB: {rgb}) to {element.Name}")
     
     # Create surface color
     surface_color = ifc_file.createIfcColourRgb(None, rgb[0], rgb[1], rgb[2])
@@ -243,16 +261,16 @@ def apply_georeferencing(ifc_file, project_coords):
     This is the standard civil engineering / surveying convention.
     """
     if not project_coords:
-        print("[GEOREFERENCE] No project coordinates provided, skipping georeferencing")
+        log("[GEOREFERENCE] No project coordinates provided, skipping georeferencing")
         return
 
     origin = project_coords.get("origin") or {}
     if not origin:
-        print("[GEOREFERENCE] No origin in project coordinates, skipping georeferencing")
+        log("[GEOREFERENCE] No origin in project coordinates, skipping georeferencing")
         return
 
-    print(f"[GEOREFERENCE] Applying IfcMapConversion:")
-    print(f"[GEOREFERENCE]   Input from app: x={origin.get('x', 0.0)}, y={origin.get('y', 0.0)}, z={origin.get('z', 0.0)}")
+    log(f"[GEOREFERENCE] Applying IfcMapConversion:")
+    log(f"[GEOREFERENCE]   Input from app: x={origin.get('x', 0.0)}, y={origin.get('y', 0.0)}, z={origin.get('z', 0.0)}")
     
     ifc_run("georeference.add_georeferencing", file=ifc_file)
 
@@ -265,26 +283,26 @@ def apply_georeferencing(ifc_file, project_coords):
         "OrthogonalHeight": origin.get("y", 0.0),  # y → height
     }
     
-    print(f"[GEOREFERENCE]   Converting Y-up to Z-up:")
-    print(f"[GEOREFERENCE]     Eastings = {coordinate_operation['Eastings']} (from x)")
-    print(f"[GEOREFERENCE]     Northings = {coordinate_operation['Northings']} (from z)")
-    print(f"[GEOREFERENCE]     OrthogonalHeight = {coordinate_operation['OrthogonalHeight']} (from y)")
+    log(f"[GEOREFERENCE]   Converting Y-up to Z-up:")
+    log(f"[GEOREFERENCE]     Eastings = {coordinate_operation['Eastings']} (from x)")
+    log(f"[GEOREFERENCE]     Northings = {coordinate_operation['Northings']} (from z)")
+    log(f"[GEOREFERENCE]     OrthogonalHeight = {coordinate_operation['OrthogonalHeight']} (from y)")
 
     north_angle = project_coords.get("northAngle")
     if north_angle is not None:
         angle_rad = math.radians(north_angle)
         coordinate_operation["XAxisAbscissa"] = math.cos(angle_rad)
         coordinate_operation["XAxisOrdinate"] = math.sin(angle_rad)
-        print(f"[GEOREFERENCE]     Rotation: {north_angle}° (XAxisAbscissa={coordinate_operation['XAxisAbscissa']:.6f}, XAxisOrdinate={coordinate_operation['XAxisOrdinate']:.6f})")
+        log(f"[GEOREFERENCE]     Rotation: {north_angle}° (XAxisAbscissa={coordinate_operation['XAxisAbscissa']:.6f}, XAxisOrdinate={coordinate_operation['XAxisOrdinate']:.6f})")
 
     projected_crs = {}
     epsg_code = project_coords.get("epsgCode")
     if epsg_code:
         projected_crs["Name"] = epsg_code
-        print(f"[GEOREFERENCE]     EPSG: {epsg_code}")
+        log(f"[GEOREFERENCE]     EPSG: {epsg_code}")
     elif project_coords.get("name"):
         projected_crs["Name"] = project_coords["name"]
-        print(f"[GEOREFERENCE]     CRS Name: {project_coords['name']}")
+        log(f"[GEOREFERENCE]     CRS Name: {project_coords['name']}")
 
     ifc_run(
         "georeference.edit_georeferencing",
@@ -293,7 +311,7 @@ def apply_georeferencing(ifc_file, project_coords):
         projected_crs=projected_crs if projected_crs else None,
     )
     
-    print("[GEOREFERENCE] ✅ Georeferencing applied successfully")
+    log("[GEOREFERENCE] ✅ Georeferencing applied successfully")
 
 
 def get_project_origin_tuple(project_coords):
@@ -389,14 +407,14 @@ def create_ifc_file(project_name=DEFAULT_PROJECT_NAME, project_coords=None, coor
         matrix=storey_matrix,
         is_si=True,
     )
-    print(f"[STOREY] Created storey placement at world origin")
-    print(f"[STOREY] storey.ObjectPlacement = {storey.ObjectPlacement}")
+    log(f"[STOREY] Created storey placement at world origin")
+    log(f"[STOREY] storey.ObjectPlacement = {storey.ObjectPlacement}")
 
     if coordinate_mode == "project":
         apply_georeferencing(ifc_file, project_coords)
     else:
-        print("[GEOREFERENCE] ⚠️  IfcMapConversion skipped (absolute coordinate mode)")
-        print("[GEOREFERENCE]    Geometry already uses real-world coordinates")
+        log("[GEOREFERENCE] ⚠️  IfcMapConversion skipped (absolute coordinate mode)")
+        log("[GEOREFERENCE]    Geometry already uses real-world coordinates")
 
     return ifc_file, storey, body_context
 
@@ -446,7 +464,7 @@ def create_chamber_geometry_solids(
     # Wall height (between slabs)
     wall_height = max(height - top_thickness, 0.1)
     
-    print(f"[CHAMBER]   Creating geometry with base={base_thickness}m, walls={wall_height}m, top={top_thickness}m")
+    log(f"[CHAMBER]   Creating geometry with base={base_thickness}m, walls={wall_height}m, top={top_thickness}m")
     
     # ===== 1. BASE SLAB (solid) =====
     if base_thickness > 0:
@@ -479,7 +497,7 @@ def create_chamber_geometry_solids(
             base_thickness
         )
         solids.append(base_solid)
-        print(f"[CHAMBER]   ✓ Base slab: {base_thickness}m thick")
+        log(f"[CHAMBER]   ✓ Base slab: {base_thickness}m thick")
     
     # ===== 2. WALLS (hollow) =====
     if wall_height > 0:
@@ -541,7 +559,7 @@ def create_chamber_geometry_solids(
             wall_height
         )
         solids.append(wall_solid)
-        print(f"[CHAMBER]   ✓ Walls: {wall_height}m tall, {wall_thickness}m thick ({NUM_SEGMENTS} segments)")
+        log(f"[CHAMBER]   ✓ Walls: {wall_height}m tall, {wall_thickness}m thick ({NUM_SEGMENTS} segments)")
     
     # ===== 3. TOP SLAB (solid with opening for lid) =====
     if top_thickness > 0:
@@ -565,7 +583,7 @@ def create_chamber_geometry_solids(
                     opening_radius = lid_radius_m + lid_frame_thickness
                 else:
                     opening_radius = radius * 0.5 if radius else min(width, length) * 0.25
-                print(f"[CHAMBER]   Lid frame outer radius: {opening_radius}m (lid_r={lid_radius_m if lid_diameter else 'N/A'}m, frame={lid_frame_thickness}m)")
+                log(f"[CHAMBER]   Lid frame outer radius: {opening_radius}m (lid_r={lid_radius_m if lid_diameter else 'N/A'}m, frame={lid_frame_thickness}m)")
             else:
                 # Rectangular lid opening
                 # Lid frame: outer_size = lid_size + frame_thickness
@@ -579,7 +597,7 @@ def create_chamber_geometry_solids(
                     opening_length = lid_length_cfg / 1000 + lid_frame_thickness
                 else:
                     opening_length = length * 0.5
-                print(f"[CHAMBER]   Lid frame outer size: {opening_width}m x {opening_length}m")
+                log(f"[CHAMBER]   Lid frame outer size: {opening_width}m x {opening_length}m")
         else:
             # No lid config - use inner wall dimensions or 50% of outer
             if shape == "circle" and radius:
@@ -629,7 +647,7 @@ def create_chamber_geometry_solids(
             top_profile = ifc_file.createIfcArbitraryProfileDefWithVoids(
                 "AREA", None, outer_polyline, [inner_polyline]
             )
-            print(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
+            log(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
         else:
             # Rectangular top slab
             # Outer boundary
@@ -655,7 +673,7 @@ def create_chamber_geometry_solids(
                     inner_points.append(ifc_file.createIfcCartesianPoint((x, y)))
                 inner_points.append(inner_points[0])
                 inner_polyline = ifc_file.createIfcPolyline(inner_points)
-                print(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
+                log(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
             else:
                 # Rectangular opening
                 half_iw = opening_width / 2
@@ -668,7 +686,7 @@ def create_chamber_geometry_solids(
                     ifc_file.createIfcCartesianPoint((-half_iw, -half_il)),
                 ]
                 inner_polyline = ifc_file.createIfcPolyline(inner_points)
-                print(f"[CHAMBER]   Top slab opening: rectangular {opening_width}m x {opening_length}m")
+                log(f"[CHAMBER]   Top slab opening: rectangular {opening_width}m x {opening_length}m")
             
             top_profile = ifc_file.createIfcArbitraryProfileDefWithVoids(
                 "AREA", None, outer_polyline, [inner_polyline]
@@ -686,9 +704,9 @@ def create_chamber_geometry_solids(
             top_thickness
         )
         solids.append(top_solid)
-        print(f"[CHAMBER]   ✓ Top slab: {top_thickness}m thick at Z={top_z}m")
+        log(f"[CHAMBER]   ✓ Top slab: {top_thickness}m thick at Z={top_z}m")
     
-    print(f"[CHAMBER]   ✅ Created {len(solids)} geometry components")
+    log(f"[CHAMBER]   ✅ Created {len(solids)} geometry components")
     return solids
 
 
@@ -886,11 +904,11 @@ def create_lid_representation(
             # Fall back to chamber diameter or min of width/length
             lid_diameter = chamber_diameter if chamber_diameter else min(chamber_width, chamber_length)
         lid_radius = lid_diameter / 2
-        print(f"[LID]   Creating circular lid (matching Three.js model):")
-        print(f"[LID]     Lid: diameter={lid_diameter}m, thickness={lid_thickness}m")
-        print(f"[LID]     Frame: thickness={frame_thickness}m (torus tube radius={frame_thickness/2}m)")
+        log(f"[LID]   Creating circular lid (matching Three.js model):")
+        log(f"[LID]     Lid: diameter={lid_diameter}m, thickness={lid_thickness}m")
+        log(f"[LID]     Frame: thickness={frame_thickness}m (torus tube radius={frame_thickness/2}m)")
         if has_vent_holes and vent_hole_count > 0:
-            print(f"[LID]     Vent holes: {vent_hole_count}")
+            log(f"[LID]     Vent holes: {vent_hole_count}")
     else:
         lid_width = lid_config.get("width")
         lid_length = lid_config.get("length")
@@ -902,11 +920,11 @@ def create_lid_representation(
             lid_length = lid_length / 1000  # mm to m
         else:
             lid_length = chamber_length
-        print(f"[LID]   Creating rectangular lid (matching Three.js model):")
-        print(f"[LID]     Lid: {lid_width}m x {lid_length}m, thickness={lid_thickness}m")
-        print(f"[LID]     Frame: {lid_width + frame_thickness}m x {lid_length + frame_thickness}m, height={frame_thickness}m")
+        log(f"[LID]   Creating rectangular lid (matching Three.js model):")
+        log(f"[LID]     Lid: {lid_width}m x {lid_length}m, thickness={lid_thickness}m")
+        log(f"[LID]     Frame: {lid_width + frame_thickness}m x {lid_length + frame_thickness}m, height={frame_thickness}m")
         if has_vent_holes and vent_hole_count > 0:
-            print(f"[LID]     Vent holes: {vent_hole_count}")
+            log(f"[LID]     Vent holes: {vent_hole_count}")
     
     solids = []
     
@@ -992,7 +1010,7 @@ def create_lid_representation(
             lid_profile = ifc_file.createIfcArbitraryProfileDefWithVoids(
                 "AREA", None, outer_polyline, vent_voids
             )
-            print(f"[LID]     Created lid profile with {vent_hole_count} vent holes (radius={vent_hole_radius*1000}mm)")
+            log(f"[LID]     Created lid profile with {vent_hole_count} vent holes (radius={vent_hole_radius*1000}mm)")
         else:
             # Solid lid (high detail circle)
             lid_profile = create_circular_polygon_profile(ifc_file, lid_radius, NUM_SEGMENTS)
@@ -1090,7 +1108,7 @@ def create_lid_representation(
             lid_profile = ifc_file.createIfcArbitraryProfileDefWithVoids(
                 "AREA", None, outer_polyline, vent_voids
             )
-            print(f"[LID]   Created rectangular lid profile with {vent_hole_count} vent holes")
+            log(f"[LID]   Created rectangular lid profile with {vent_hole_count} vent holes")
         else:
             # Solid rectangular lid
             lid_profile = ifc_file.createIfcRectangleProfileDef(
@@ -1112,7 +1130,7 @@ def create_lid_representation(
         )
         solids.append(lid_solid)
     
-    print(f"[LID]   ✅ Created {len(solids)} geometry items (frame + lid) with {NUM_SEGMENTS} segments")
+    log(f"[LID]   ✅ Created {len(solids)} geometry items (frame + lid) with {NUM_SEGMENTS} segments")
     return solids
 
 
@@ -1157,7 +1175,7 @@ def add_chamber_to_ifc(
     wall_thickness = max(float(wall_thickness or 0.0), 0.0)
     
     # ===== CODE VERSION: 2025-11-17 ABSOLUTE COORDINATES =====
-    print("[CHAMBER] 🔧 Using ABSOLUTE world coordinate placement")
+    log("[CHAMBER] 🔧 Using ABSOLUTE world coordinate placement")
     
     # Chamber position in world coordinates (from app)
     world_x = position.get("x", 0.0)
@@ -1175,14 +1193,14 @@ def add_chamber_to_ifc(
         coordinate_mode,
     )
     
-    print(f"[CHAMBER] Adding chamber: {chamber_data.get('name', chamber_data.get('id'))}")
-    print(f"[CHAMBER]   Absolute world position: x={world_x}, invert_y={world_invert_y}, z={world_z}")
+    log(f"[CHAMBER] Adding chamber: {chamber_data.get('name', chamber_data.get('id'))}")
+    log(f"[CHAMBER]   Absolute world position: x={world_x}, invert_y={world_invert_y}, z={world_z}")
     if shape == "circle":
-        print(f"[CHAMBER]   Dimensions: diameter={diameter if diameter else width}m, height={chamber_height}m")
+        log(f"[CHAMBER]   Dimensions: diameter={diameter if diameter else width}m, height={chamber_height}m")
     else:
-        print(f"[CHAMBER]   Dimensions: width={width}m, length={length}m, height={chamber_height}m")
-    print(f"[CHAMBER]   Wall thickness: {wall_thickness}m, Base thickness: {base_thickness}m, Top thickness: {top_thickness}m")
-    print(f"[CHAMBER]   Levels: cover={cover_level}m, invert={invert_level}m")
+        log(f"[CHAMBER]   Dimensions: width={width}m, length={length}m, height={chamber_height}m")
+    log(f"[CHAMBER]   Wall thickness: {wall_thickness}m, Base thickness: {base_thickness}m, Top thickness: {top_thickness}m")
+    log(f"[CHAMBER]   Levels: cover={cover_level}m, invert={invert_level}m")
 
     chamber = ifc_run(
         "root.create_entity",
@@ -1194,7 +1212,7 @@ def add_chamber_to_ifc(
 
     # Rotation is sent in RADIANS from frontend (stored as radians in Chamber interface)
     rotation_radians = chamber_data.get("rotation", 0.0) or 0.0
-    print(f"[CHAMBER]   Rotation: {rotation_radians} radians ({math.degrees(rotation_radians):.2f}°)")
+    log(f"[CHAMBER]   Rotation: {rotation_radians} radians ({math.degrees(rotation_radians):.2f}°)")
 
     # Convert Y-up (Three.js) to Z-up (IFC/Revit)
     # Use ABSOLUTE world coordinates directly
@@ -1224,11 +1242,11 @@ def add_chamber_to_ifc(
     
     cover_elevation = invert_elevation + chamber_height
 
-    print(f"[CHAMBER]   Input WORLD (Y-up): x={world_x}, invert_y={world_invert_y}, z={world_z}")
-    print(f"[CHAMBER]   Converted ({coordinate_mode}) position: x={local_x}, y={local_y}, z={local_z}")
-    print(f"[CHAMBER]   Cover elevation (mode): {cover_elevation}, Invert elevation: {invert_elevation}, Base thickness: {base_thickness}")
-    print(f"[CHAMBER]   Output WORLD (Z-up): X={chamber_matrix[0, 3]}, Y={chamber_matrix[1, 3]}, Z={chamber_matrix[2, 3]} (at invert)")
-    print(f"[CHAMBER]   ✅ Placement uses {coordinate_mode.upper()} coordinates")
+    log(f"[CHAMBER]   Input WORLD (Y-up): x={world_x}, invert_y={world_invert_y}, z={world_z}")
+    log(f"[CHAMBER]   Converted ({coordinate_mode}) position: x={local_x}, y={local_y}, z={local_z}")
+    log(f"[CHAMBER]   Cover elevation (mode): {cover_elevation}, Invert elevation: {invert_elevation}, Base thickness: {base_thickness}")
+    log(f"[CHAMBER]   Output WORLD (Z-up): X={chamber_matrix[0, 3]}, Y={chamber_matrix[1, 3]}, Z={chamber_matrix[2, 3]} (at invert)")
+    log(f"[CHAMBER]   ✅ Placement uses {coordinate_mode.upper()} coordinates")
 
     # CRITICAL: Place chamber with ABSOLUTE coordinates (PlacementRelTo=None)
     # This bypasses any relative coordinate systems and places geometry at exact world position
@@ -1245,7 +1263,7 @@ def add_chamber_to_ifc(
     # This tells IFC readers to use coordinates as-is without any transformations
     if placement and hasattr(placement, 'PlacementRelTo'):
         placement.PlacementRelTo = None
-        print(f"[CHAMBER]   ✅ Placement set to ABSOLUTE (PlacementRelTo=None)")
+        log(f"[CHAMBER]   ✅ Placement set to ABSOLUTE (PlacementRelTo=None)")
 
     # Get lid config for sizing top slab opening
     lid_config = chamber_data.get("lidConfig")
@@ -1307,7 +1325,7 @@ def add_chamber_to_ifc(
         # Convert hex to RGB (0-1 range)
         hex_color = wall_color_hex.lstrip('#')
         material_color = tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
-        print(f"[CHAMBER]   Using custom wall color: {wall_color_hex} -> RGB{material_color}")
+        log(f"[CHAMBER]   Using custom wall color: {wall_color_hex} -> RGB{material_color}")
     else:
         material_color = material_colors.get(chamber_material, (0.533, 0.533, 0.533))
     
@@ -1339,7 +1357,7 @@ def add_chamber_to_ifc(
         [chamber],
         material
     )
-    print(f"[CHAMBER]   ✓ Material: {chamber_material}")
+    log(f"[CHAMBER]   ✓ Material: {chamber_material}")
     
     # ===== ADD PROPERTY SETS =====
     # Pset_ManholeChamberCommon - Standard IFC property set
@@ -1544,13 +1562,13 @@ def add_chamber_to_ifc(
             custom_pset
         )
     
-    print(f"[CHAMBER]   ✓ Property sets added")
+    log(f"[CHAMBER]   ✓ Property sets added")
 
     # Create lid if lid configuration is provided
     lid_config = chamber_data.get("lidConfig")
     lid_element = None
     if lid_config:
-        print(f"[CHAMBER] Creating lid for chamber {chamber_data.get('name', chamber_data.get('id'))}")
+        log(f"[CHAMBER] Creating lid for chamber {chamber_data.get('name', chamber_data.get('id'))}")
         
         # Create lid element
         lid_element = ifc_run(
@@ -1603,8 +1621,8 @@ def add_chamber_to_ifc(
             lid_matrix[1, 3] = local_z
             lid_matrix[2, 3] = lid_placement_z
             
-            print(f"[LID]   Frame thickness: {lid_frame_thickness}m")
-            print(f"[LID]   Position: X={local_x}, Y={local_z}, Z={lid_placement_z} (cover={cover_elevation}, offset={-lid_frame_thickness/2})")
+            log(f"[LID]   Frame thickness: {lid_frame_thickness}m")
+            log(f"[LID]   Position: X={local_x}, Y={local_z}, Z={lid_placement_z} (cover={cover_elevation}, offset={-lid_frame_thickness/2})")
             
             # Set lid placement
             lid_placement = ifc_run(
@@ -1776,9 +1794,9 @@ def add_chamber_to_ifc(
                 lid_pset
             )
             
-            print(f"[LID]   ✓ Material: {lid_material_name}")
-            print(f"[LID]   ✓ Property set added")
-            print(f"[LID]   ✅ Lid created successfully")
+            log(f"[LID]   ✓ Material: {lid_material_name}")
+            log(f"[LID]   ✓ Property set added")
+            log(f"[LID]   ✅ Lid created successfully")
 
     return chamber
 
@@ -1812,13 +1830,13 @@ def add_pipe_to_ifc(
     color_hex = pipe_data.get("color", None)  # Hex color (e.g., "#FF0000")
     drainage_connection = pipe_data.get("drainageConnection")
     
-    print(f"\n[PIPE] Adding pipe: {pipe_id}")
-    print(f"[PIPE]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
+    log(f"\n[PIPE] Adding pipe: {pipe_id}")
+    log(f"[PIPE]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
     if drainage_connection:
-        print(f"[PIPE]   Drainage connection: {drainage_connection}")
-    print(f"[PIPE]   Start (Y-up): {start_point}")
-    print(f"[PIPE]   End (Y-up): {end_point}")
-    print(f"[PIPE]   Diameter: {diameter}m")
+        log(f"[PIPE]   Drainage connection: {drainage_connection}")
+    log(f"[PIPE]   Start (Y-up): {start_point}")
+    log(f"[PIPE]   End (Y-up): {end_point}")
+    log(f"[PIPE]   Diameter: {diameter}m")
     
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
 
@@ -1830,12 +1848,12 @@ def add_pipe_to_ifc(
     points_ifc = convert_points_yup_to_ifc(points, origin_tuple, coordinate_mode)
     
     if len(points_ifc) < 2:
-        print(f"[PIPE]   ⚠️ Skipping pipe - insufficient points")
+        log(f"[PIPE]   ⚠️ Skipping pipe - insufficient points")
         return None
     
-    print(f"[PIPE]   Converting {len(points_ifc)} points to extruded segments")
-    print(f"[PIPE]   Start (Z-up): {points_ifc[0]}")
-    print(f"[PIPE]   End (Z-up): {points_ifc[-1]}")
+    log(f"[PIPE]   Converting {len(points_ifc)} points to extruded segments")
+    log(f"[PIPE]   Start (Z-up): {points_ifc[0]}")
+    log(f"[PIPE]   End (Z-up): {points_ifc[-1]}")
     
     # Determine predefined type based on utility
     utility_lower = utility_type.lower()
@@ -1945,10 +1963,10 @@ def add_pipe_to_ifc(
         segments_created += 1
     
     if not extruded_solids:
-        print(f"[PIPE]   ⚠️ No valid segments created")
+        log(f"[PIPE]   ⚠️ No valid segments created")
         return None
     
-    print(f"[PIPE]   ✅ Created {segments_created} extruded segments, total length: {total_length:.3f}m")
+    log(f"[PIPE]   ✅ Created {segments_created} extruded segments, total length: {total_length:.3f}m")
     
     # Create pipe segment entity
     pipe = ifc_run(
@@ -1999,7 +2017,7 @@ def add_pipe_to_ifc(
     if color_hex:
         apply_color_to_element(ifc_file, pipe, color_hex)
     
-    print(f"[PIPE]   ✅ Pipe created successfully")
+    log(f"[PIPE]   ✅ Pipe created successfully")
     
     return pipe
 
@@ -2049,15 +2067,15 @@ def add_road_to_ifc(
     components = road_data.get("components", [])
     widening_groups = road_data.get("wideningGroups", [])
     
-    print(f"\n[ROAD] Adding road: {road_name}")
-    print(f"[ROAD]   Components: {len(components)}")
+    log(f"\n[ROAD] Adding road: {road_name}")
+    log(f"[ROAD]   Components: {len(components)}")
     
     # Log all component types for debugging
     component_types = [comp.get("type", "unknown") for comp in components]
     type_counts = {}
     for ct in component_types:
         type_counts[ct] = type_counts.get(ct, 0) + 1
-    print(f"[ROAD]   Component type breakdown: {type_counts}")
+    log(f"[ROAD]   Component type breakdown: {type_counts}")
     
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     
@@ -2104,7 +2122,7 @@ def add_road_to_ifc(
         if component.get("featureId"):
             element_name += f"_{component.get('featureId')}"
         
-        print(f"[ROAD]   Component {comp_idx + 1}/{total_components}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
+        log(f"[ROAD]   Component {comp_idx + 1}/{total_components}: {comp_type} ({comp_side or 'center'}) - {len(vertices)} vertices, {len(indices)} indices")
         
         # Update progress every 10 components or at key milestones
         if progress_callback and (comp_idx % 10 == 0 or comp_idx == total_components - 1):
@@ -2144,10 +2162,10 @@ def add_road_to_ifc(
             # They preserve exact geometry including crossfalls, profiles, and layers
             vertices = component.get("vertices", [])
             indices = component.get("indices", [])
-            print(f"[ROAD]   Processing {comp_type}: {len(vertices)} vertices, {len(indices) // 3 if indices else 0} triangles")
+            log(f"[ROAD]   Processing {comp_type}: {len(vertices)} vertices, {len(indices) // 3 if indices else 0} triangles")
             
             if len(vertices) < 3 or len(indices) < 3:
-                print(f"[ROAD]   ⚠️ {comp_type} has insufficient geometry: {len(vertices)} vertices, {len(indices)} indices")
+                log(f"[ROAD]   ⚠️ {comp_type} has insufficient geometry: {len(vertices)} vertices, {len(indices)} indices")
             else:
                 element = create_road_mesh_element(
                     ifc_file, storey, context,
@@ -2157,14 +2175,14 @@ def add_road_to_ifc(
                 )
                 if element:
                     created_elements.append(element)
-                    print(f"[ROAD]   ✅ Created {comp_type} element: {element_name}")
+                    log(f"[ROAD]   ✅ Created {comp_type} element: {element_name}")
                 else:
-                    print(f"[ROAD]   ⚠️ Failed to create {comp_type} element: {element_name}")
+                    log(f"[ROAD]   ⚠️ Failed to create {comp_type} element: {element_name}")
         else:
-            print(f"[ROAD]   ⚠️ Unknown component type: {comp_type}")
+            log(f"[ROAD]   ⚠️ Unknown component type: {comp_type}")
 
     if widening_groups:
-        print(f"[ROAD]   Adding {len(widening_groups)} widening group metadata records")
+        log(f"[ROAD]   Adding {len(widening_groups)} widening group metadata records")
         for widening_group in widening_groups:
             group_id = widening_group.get("groupId")
             if not group_id:
@@ -2208,11 +2226,11 @@ def add_road_to_ifc(
                     "PointIds": widening_group.get("pointIds", []),
                 })
                 created_elements.append(proxy)
-                print(f"[ROAD]   ✅ Created widening metadata element: {group_name}")
+                log(f"[ROAD]   ✅ Created widening metadata element: {group_name}")
             except Exception as e:
-                print(f"[ROAD]   ⚠️ Failed to create widening metadata element {group_name}: {e}")
+                log(f"[ROAD]   ⚠️ Failed to create widening metadata element {group_name}: {e}")
     
-    print(f"[ROAD]   ✅ Road created with {len(created_elements)} elements")
+    log(f"[ROAD]   ✅ Road created with {len(created_elements)} elements")
     
     return created_elements
 
@@ -2233,13 +2251,13 @@ def create_road_mesh_element(
     vertices = component.get("vertices", [])
     indices = component.get("indices", [])
     
-    print(f"[ROAD]     create_road_mesh_element called for {comp_type}: {len(vertices)} vertices, {len(indices)} indices")
+    log(f"[ROAD]     create_road_mesh_element called for {comp_type}: {len(vertices)} vertices, {len(indices)} indices")
     
     if len(vertices) < 3 or len(indices) < 3:
-        print(f"[ROAD]     ⚠️ Insufficient geometry for {element_name}: {len(vertices)} vertices, {len(indices)} indices")
+        log(f"[ROAD]     ⚠️ Insufficient geometry for {element_name}: {len(vertices)} vertices, {len(indices)} indices")
         return None
     
-    print(f"[ROAD]     Creating mesh: {len(vertices)} vertices, {len(indices) // 3} triangles, type={comp_type}")
+    log(f"[ROAD]     Creating mesh: {len(vertices)} vertices, {len(indices) // 3} triangles, type={comp_type}")
     
     # Convert vertices from Y-up to Z-up (IFC coordinate system)
     ifc_vertices = []
@@ -2258,11 +2276,11 @@ def create_road_mesh_element(
     
     # Log coordinate bounds for debugging
     if len(coord_bounds["x"]) > 0:
-        print(f"[ROAD]     {comp_type} coordinate bounds (after conversion):")
-        print(f"[ROAD]       X: [{min(coord_bounds['x']):.2f}, {max(coord_bounds['x']):.2f}]")
-        print(f"[ROAD]       Y: [{min(coord_bounds['y']):.2f}, {max(coord_bounds['y']):.2f}]")
-        print(f"[ROAD]       Z: [{min(coord_bounds['z']):.2f}, {max(coord_bounds['z']):.2f}]")
-        print(f"[ROAD]       First vertex (IFC): [{ifc_vertices[0][0]:.2f}, {ifc_vertices[0][1]:.2f}, {ifc_vertices[0][2]:.2f}]")
+        log(f"[ROAD]     {comp_type} coordinate bounds (after conversion):")
+        log(f"[ROAD]       X: [{min(coord_bounds['x']):.2f}, {max(coord_bounds['x']):.2f}]")
+        log(f"[ROAD]       Y: [{min(coord_bounds['y']):.2f}, {max(coord_bounds['y']):.2f}]")
+        log(f"[ROAD]       Z: [{min(coord_bounds['z']):.2f}, {max(coord_bounds['z']):.2f}]")
+        log(f"[ROAD]       First vertex (IFC): [{ifc_vertices[0][0]:.2f}, {ifc_vertices[0][1]:.2f}, {ifc_vertices[0][2]:.2f}]")
     
     # Create IFC cartesian point list
     coord_list = ifc_file.createIfcCartesianPointList3D(ifc_vertices)
@@ -2508,7 +2526,7 @@ def create_road_mesh_element(
     
     # Create the element
     try:
-        print(f"[ROAD]     Creating IFC element: class={ifc_class}, predefined_type={predefined_type}, name={element_name}")
+        log(f"[ROAD]     Creating IFC element: class={ifc_class}, predefined_type={predefined_type}, name={element_name}")
         road_element = ifc_run(
             "root.create_entity",
             file=ifc_file,
@@ -2516,9 +2534,9 @@ def create_road_mesh_element(
             name=element_name,
             predefined_type=predefined_type,
         )
-        print(f"[ROAD]     ✅ Created IFC element: {road_element}")
+        log(f"[ROAD]     ✅ Created IFC element: {road_element}")
     except Exception as e:
-        print(f"[ROAD]     ❌ ERROR creating IFC element: {e}")
+        log(f"[ROAD]     ❌ ERROR creating IFC element: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -2534,9 +2552,9 @@ def create_road_mesh_element(
         )
         road_element.ObjectPlacement = placement
         road_element.Representation = product_shape
-        print(f"[ROAD]     ✅ Set placement and representation")
+        log(f"[ROAD]     ✅ Set placement and representation")
     except Exception as e:
-        print(f"[ROAD]     ❌ ERROR setting placement: {e}")
+        log(f"[ROAD]     ❌ ERROR setting placement: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -2549,9 +2567,9 @@ def create_road_mesh_element(
             products=[road_element],
             relating_structure=storey,
         )
-        print(f"[ROAD]     ✅ Assigned to storey")
+        log(f"[ROAD]     ✅ Assigned to storey")
     except Exception as e:
-        print(f"[ROAD]     ❌ ERROR assigning to storey: {e}")
+        log(f"[ROAD]     ❌ ERROR assigning to storey: {e}")
         import traceback
         traceback.print_exc()
         # Don't return None here - element is still valid even if container assignment fails
@@ -2560,9 +2578,9 @@ def create_road_mesh_element(
     if color_hex:
         try:
             apply_color_to_element(ifc_file, road_element, color_hex)
-            print(f"[ROAD]     ✅ Applied color: {color_hex}")
+            log(f"[ROAD]     ✅ Applied color: {color_hex}")
         except Exception as e:
-            print(f"[ROAD]     ⚠️ WARNING: Could not apply color: {e}")
+            log(f"[ROAD]     ⚠️ WARNING: Could not apply color: {e}")
 
     # Site mesh element types (buildings, ducts, cable trays, terrain) carry
     # their own Pset_InfraGridSiteElement instead of the road component pset.
@@ -2628,9 +2646,9 @@ def create_road_mesh_element(
                     "BarCount": component.get("bridgeBarCount"),
                 })
         except Exception as e:
-            print(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
+            log(f"[ROAD]     ⚠️ WARNING: Could not apply road component properties: {e}")
     
-    print(f"[ROAD]     ✅ Successfully created {comp_type} element: {element_name}")
+    log(f"[ROAD]     ✅ Successfully created {comp_type} element: {element_name}")
     return road_element
 
 
@@ -2647,13 +2665,13 @@ def create_road_swept_element(
     profile = component.get("profile", {})
     
     if len(centerline) < 2:
-        print(f"[ROAD]     ⚠️ Insufficient centerline points for {element_name}")
+        log(f"[ROAD]     ⚠️ Insufficient centerline points for {element_name}")
         return None
     
     # Convert centerline points to IFC coordinates
     points_ifc = convert_points_yup_to_ifc(centerline, origin_tuple, coordinate_mode)
     
-    print(f"[ROAD]     Creating swept solid: {len(points_ifc)} path points")
+    log(f"[ROAD]     Creating swept solid: {len(points_ifc)} path points")
     
     # Determine profile based on component type
     if comp_type == "kerb":
@@ -2722,7 +2740,7 @@ def create_road_swept_element(
         polyline = ifc_file.createIfcPolyline(ifc_profile_points)
         profile_def = ifc_file.createIfcArbitraryClosedProfileDef("AREA", None, polyline)
     else:
-        print(f"[ROAD]     ⚠️ Unknown swept component type: {comp_type}")
+        log(f"[ROAD]     ⚠️ Unknown swept component type: {comp_type}")
         return None
     
     # Create extruded segments between consecutive points (same approach as pipes)
@@ -2788,7 +2806,7 @@ def create_road_swept_element(
         extruded_solids.append(extruded_solid)
     
     if not extruded_solids:
-        print(f"[ROAD]     ⚠️ No valid segments created for {element_name}")
+        log(f"[ROAD]     ⚠️ No valid segments created for {element_name}")
         return None
     
     # Create shape representation
@@ -2847,7 +2865,7 @@ def create_road_swept_element(
     if color_hex:
         apply_color_to_element(ifc_file, element, color_hex)
     
-    print(f"[ROAD]     ✅ Created {comp_type} with {len(extruded_solids)} segments")
+    log(f"[ROAD]     ✅ Created {comp_type} with {len(extruded_solids)} segments")
     
     return element
 
@@ -2878,9 +2896,9 @@ def add_cable_tray_to_ifc(
     points = tray_data.get("points", None)
     color_hex = tray_data.get("color", None)
     
-    print(f"\n[CABLE TRAY] Adding: {tray_id}")
-    print(f"[CABLE TRAY]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
-    print(f"[CABLE TRAY]   Width: {width}m, Height: {height}m")
+    log(f"\n[CABLE TRAY] Adding: {tray_id}")
+    log(f"[CABLE TRAY]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
+    log(f"[CABLE TRAY]   Width: {width}m, Height: {height}m")
     
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
 
@@ -2900,7 +2918,7 @@ def add_cable_tray_to_ifc(
     # Use composite curve approach for U-shaped cable tray (similar to pipe but with 3 parallel "pipes")
     # Create three swept disk solids: bottom + two sides
     if points and len(points) >= 2:
-        print(f"[CABLE TRAY]   Creating U-SHAPED SWEPT SOLID with {len(points)} points")
+        log(f"[CABLE TRAY]   Creating U-SHAPED SWEPT SOLID with {len(points)} points")
         
         # Convert points to IFC coordinates
         points_ifc = convert_points_yup_to_ifc(points, origin_tuple, coordinate_mode)
@@ -2975,7 +2993,7 @@ def add_cable_tray_to_ifc(
         # Full U-channel would require Boolean operations which are complex
         # This will at least show SOMETHING in the viewer
         
-        print(f"[CABLE TRAY]   ✅ Creating simplified swept disk solid")
+        log(f"[CABLE TRAY]   ✅ Creating simplified swept disk solid")
         # Use a thick swept disk to represent the cable tray
         # Use larger of width or height for visibility
         tray_radius = max(width, height) / 3  # Make it substantial but not too large
@@ -2986,9 +3004,9 @@ def add_cable_tray_to_ifc(
             None,
             None
         )
-        print(f"[CABLE TRAY]   Tray dimensions: width={width}m, height={height}m")
-        print(f"[CABLE TRAY]   Using radius: {tray_radius}m for swept disk")
-        print(f"[CABLE TRAY]   Path has {len(points_ifc)} points")
+        log(f"[CABLE TRAY]   Tray dimensions: width={width}m, height={height}m")
+        log(f"[CABLE TRAY]   Using radius: {tray_radius}m for swept disk")
+        log(f"[CABLE TRAY]   Path has {len(points_ifc)} points")
     
     # Set placement at origin (geometry already in target coordinate space)
     origin_point = ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0))
@@ -3015,7 +3033,7 @@ def add_cable_tray_to_ifc(
     )
     tray.Representation = product_shape
     
-    print(f"[CABLE TRAY]   ✅ Geometry created")
+    log(f"[CABLE TRAY]   ✅ Geometry created")
     
     # Assign to spatial container
     ifc_run(
@@ -3029,7 +3047,7 @@ def add_cable_tray_to_ifc(
     if color_hex:
         apply_color_to_element(ifc_file, tray, color_hex)
     
-    print(f"[CABLE TRAY]   ✅ Created successfully")
+    log(f"[CABLE TRAY]   ✅ Created successfully")
     return tray
 
 
@@ -3059,15 +3077,15 @@ def add_hanger_to_ifc(
     rotation_radians = hanger_data.get("rotation", 0.0) or 0.0
     direction = hanger_data.get("direction", [1, 0, 0])  # Tangent direction
     
-    print(f"\n[HANGER] Adding: {hanger_id}")
-    print(f"[HANGER]   Position (Y-up): {position}")
-    print(f"[HANGER]   Height: {height}m ({height*1000}mm)")
-    print(f"[HANGER]   Rod diameter: {rod_diameter}m ({rod_diameter*1000}mm)")
-    print(f"[HANGER]   Tray width: {tray_width}m ({tray_width*1000}mm)")
-    print(f"[HANGER]   Crossbar width: {crossbar_width}m ({crossbar_width*1000}mm)")
-    print(f"[HANGER]   Crossbar depth: {crossbar_depth}m ({crossbar_depth*1000}mm)")
-    print(f"[HANGER]   Rotation: {rotation_radians} radians ({math.degrees(rotation_radians):.2f}°)")
-    print(f"[HANGER]   Direction: {direction}")
+    log(f"\n[HANGER] Adding: {hanger_id}")
+    log(f"[HANGER]   Position (Y-up): {position}")
+    log(f"[HANGER]   Height: {height}m ({height*1000}mm)")
+    log(f"[HANGER]   Rod diameter: {rod_diameter}m ({rod_diameter*1000}mm)")
+    log(f"[HANGER]   Tray width: {tray_width}m ({tray_width*1000}mm)")
+    log(f"[HANGER]   Crossbar width: {crossbar_width}m ({crossbar_width*1000}mm)")
+    log(f"[HANGER]   Crossbar depth: {crossbar_depth}m ({crossbar_depth*1000}mm)")
+    log(f"[HANGER]   Rotation: {rotation_radians} radians ({math.degrees(rotation_radians):.2f}°)")
+    log(f"[HANGER]   Direction: {direction}")
     
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     pos_ifc = convert_point_yup_to_ifc(position, origin_tuple, coordinate_mode)
@@ -3103,8 +3121,8 @@ def add_hanger_to_ifc(
     hanger_matrix[1, 3] = pos_ifc[1]  # Y
     hanger_matrix[2, 3] = pos_ifc[2] + height  # Z (at ceiling)
     
-    print(f"[HANGER]   Crossbar rotation: {math.degrees(crossbar_rotation):.2f}° (perpendicular to path)")
-    print(f"[HANGER]   Position (IFC Z-up, {coordinate_mode}): X={pos_ifc[0]:.2f}, Y={pos_ifc[1]:.2f}, Z={pos_ifc[2]:.2f}")
+    log(f"[HANGER]   Crossbar rotation: {math.degrees(crossbar_rotation):.2f}° (perpendicular to path)")
+    log(f"[HANGER]   Position (IFC Z-up, {coordinate_mode}): X={pos_ifc[0]:.2f}, Y={pos_ifc[1]:.2f}, Z={pos_ifc[2]:.2f}")
     
     # Set placement using matrix
     placement = ifc_run(
@@ -3127,10 +3145,10 @@ def add_hanger_to_ifc(
     rod_radius = rod_diameter / 2
     half_crossbar = crossbar_width / 2  # For centering bars
     
-    print(f"[HANGER]   Creating geometry with:")
-    print(f"[HANGER]     Tray width: {tray_width*1000:.1f}mm, Half: {half_width*1000:.1f}mm")
-    print(f"[HANGER]     Crossbar: {crossbar_width*1000:.1f}mm x {crossbar_depth*1000:.1f}mm")
-    print(f"[HANGER]     Rod diameter: {rod_diameter*1000:.1f}mm, Radius: {rod_radius*1000:.1f}mm")
+    log(f"[HANGER]   Creating geometry with:")
+    log(f"[HANGER]     Tray width: {tray_width*1000:.1f}mm, Half: {half_width*1000:.1f}mm")
+    log(f"[HANGER]     Crossbar: {crossbar_width*1000:.1f}mm x {crossbar_depth*1000:.1f}mm")
+    log(f"[HANGER]     Rod diameter: {rod_diameter*1000:.1f}mm, Radius: {rod_radius*1000:.1f}mm")
     
     # 1. Top crossbar (horizontal at ceiling, centered vertically)
     # Position so it's centered at Z=0 (ceiling level in local coords)
@@ -3212,10 +3230,10 @@ def add_hanger_to_ifc(
     bottom_bar_bottom = tray_z - half_crossbar
     rod_length = (top_bar_bottom - bottom_bar_top)
     
-    print(f"[HANGER]   Top crossbar: {top_bar_bottom:.3f}m to {top_bar_top:.3f}m (centered at {ceiling_z:.3f}m)")
-    print(f"[HANGER]   Bottom bar: {bottom_bar_bottom:.3f}m to {bottom_bar_top:.3f}m (centered at {tray_z:.3f}m)")
-    print(f"[HANGER]   Vertical rods: {rod_length:.3f}m ({rod_length*1000:.1f}mm) connecting the bars")
-    print(f"[HANGER]   Total height (bar center to bar center): {height:.3f}m ({height*1000:.1f}mm)")
+    log(f"[HANGER]   Top crossbar: {top_bar_bottom:.3f}m to {top_bar_top:.3f}m (centered at {ceiling_z:.3f}m)")
+    log(f"[HANGER]   Bottom bar: {bottom_bar_bottom:.3f}m to {bottom_bar_top:.3f}m (centered at {tray_z:.3f}m)")
+    log(f"[HANGER]   Vertical rods: {rod_length:.3f}m ({rod_length*1000:.1f}mm) connecting the bars")
+    log(f"[HANGER]   Total height (bar center to bar center): {height:.3f}m ({height*1000:.1f}mm)")
     
     # Create shape representation with all components
     shape_representation = ifc_file.createIfcShapeRepresentation(
@@ -3232,7 +3250,7 @@ def add_hanger_to_ifc(
     )
     hanger.Representation = product_shape
     
-    print(f"[HANGER]   ✅ Geometry complete: top bar + 2 rods + bottom bar (all same thickness)")
+    log(f"[HANGER]   ✅ Geometry complete: top bar + 2 rods + bottom bar (all same thickness)")
     
     # Assign to spatial container
     ifc_run(
@@ -3246,7 +3264,7 @@ def add_hanger_to_ifc(
     if color_hex:
         apply_color_to_element(ifc_file, hanger, color_hex)
     
-    print(f"[HANGER]   ✅ Created successfully")
+    log(f"[HANGER]   ✅ Created successfully")
     return hanger
 
 
@@ -3269,10 +3287,10 @@ def add_dwg_line_to_ifc(ifc_file, storey, context, line_data, project_coords=Non
     color_hex = line_data.get("color", None)
     line_id = line_data.get("id", f"Line_{layer_name}")
     
-    print(f"[DWG LINE] Adding line: {line_id}")
-    print(f"[DWG LINE]   Start (Y-up): {start_point}")
-    print(f"[DWG LINE]   End (Y-up): {end_point}")
-    print(f"[DWG LINE]   Layer: {layer_name}")
+    log(f"[DWG LINE] Adding line: {line_id}")
+    log(f"[DWG LINE]   Start (Y-up): {start_point}")
+    log(f"[DWG LINE]   End (Y-up): {end_point}")
+    log(f"[DWG LINE]   Layer: {layer_name}")
     
     # Convert Y-up (Three.js) to Z-up (IFC)
     # Input: [x=easting, y=elevation, z=northing]
@@ -3344,7 +3362,7 @@ def add_dwg_line_to_ifc(ifc_file, storey, context, line_data, project_coords=Non
     if color_hex:
         apply_color_to_element(ifc_file, line_element, color_hex)
     
-    print(f"[DWG LINE]   ✅ Line created successfully")
+    log(f"[DWG LINE]   ✅ Line created successfully")
     return line_element
 
 
@@ -3367,12 +3385,12 @@ def add_dwg_polyline_to_ifc(ifc_file, storey, context, polyline_data, project_co
     polyline_id = polyline_data.get("id", f"Polyline_{layer_name}")
     
     if len(vertices) < 2:
-        print(f"[DWG POLYLINE] ⚠️ Skipping polyline with < 2 vertices")
+        log(f"[DWG POLYLINE] ⚠️ Skipping polyline with < 2 vertices")
         return None
     
-    print(f"[DWG POLYLINE] Adding polyline: {polyline_id}")
-    print(f"[DWG POLYLINE]   Vertices: {len(vertices)}")
-    print(f"[DWG POLYLINE]   Layer: {layer_name}")
+    log(f"[DWG POLYLINE] Adding polyline: {polyline_id}")
+    log(f"[DWG POLYLINE]   Vertices: {len(vertices)}")
+    log(f"[DWG POLYLINE]   Layer: {layer_name}")
     
     # Convert Y-up (Three.js) to Z-up (IFC)
     # IMPORTANT: Convert to float explicitly for IfcCartesianPoint
@@ -3441,7 +3459,7 @@ def add_dwg_polyline_to_ifc(ifc_file, storey, context, polyline_data, project_co
     if color_hex:
         apply_color_to_element(ifc_file, polyline_element, color_hex)
     
-    print(f"[DWG POLYLINE]   ✅ Polyline created successfully")
+    log(f"[DWG POLYLINE]   ✅ Polyline created successfully")
     return polyline_element
 
 
@@ -3466,12 +3484,12 @@ def add_connected_path_to_ifc(ifc_file, storey, context, path_data, project_coor
     path_id = path_data.get("id", f"Path_{layer_name}")
     
     if len(vertices) < 2:
-        print(f"[CONNECTED PATH] ⚠️ Skipping path with < 2 vertices")
+        log(f"[CONNECTED PATH] ⚠️ Skipping path with < 2 vertices")
         return None
     
-    print(f"[CONNECTED PATH] Adding path: {path_id}")
-    print(f"[CONNECTED PATH]   Vertices: {len(vertices)}")
-    print(f"[CONNECTED PATH]   Layer: {layer_name}")
+    log(f"[CONNECTED PATH] Adding path: {path_id}")
+    log(f"[CONNECTED PATH]   Vertices: {len(vertices)}")
+    log(f"[CONNECTED PATH]   Layer: {layer_name}")
     
     # Convert Y-up (Three.js) to Z-up (IFC)
     # Input: [x=easting, y=elevation, z=northing]
@@ -3542,7 +3560,7 @@ def add_connected_path_to_ifc(ifc_file, storey, context, path_data, project_coor
     if color_hex:
         apply_color_to_element(ifc_file, path_element, color_hex)
     
-    print(f"[CONNECTED PATH]   ✅ Path created successfully with swept solid extrusion")
+    log(f"[CONNECTED PATH]   ✅ Path created successfully with swept solid extrusion")
     return path_element
 
 
@@ -3559,7 +3577,7 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
     """
     try:
         path_count = len(connected_paths_data) if connected_paths_data else 0
-        print(f"[DWG EXPORT] Starting export with {path_count} connected paths")
+        log(f"[DWG EXPORT] Starting export with {path_count} connected paths")
         
         project_name = (project_coords or {}).get("name", "DWG Scheme Lines")
         ifc_file, storey, context = create_ifc_file(project_name, project_coords)
@@ -3567,12 +3585,12 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
         # Export connected paths as swept solids
         if connected_paths_data:
             for index, path in enumerate(connected_paths_data, start=1):
-                print(f"[DWG EXPORT] Adding connected path {index}/{path_count}")
+                log(f"[DWG EXPORT] Adding connected path {index}/{path_count}")
                 add_connected_path_to_ifc(ifc_file, storey, context, path, project_coords)
         
-        print(f"[DWG EXPORT] Writing IFC to {output_path}")
+        log(f"[DWG EXPORT] Writing IFC to {output_path}")
         ifc_file.write(output_path)
-        print("[DWG EXPORT] ✅ Export complete!")
+        log("[DWG EXPORT] ✅ Export complete!")
         
         return {
             "success": True,
@@ -3581,7 +3599,7 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
         }
     
     except Exception as error:
-        print(f"[DWG EXPORT] ❌ ERROR: {error}")
+        log(f"[DWG EXPORT] ❌ ERROR: {error}")
         import traceback
         traceback.print_exc()
         return {
@@ -3614,14 +3632,14 @@ def add_light_connection_to_ifc(
     color_hex = connection_data.get("color", "#FFA500")  # Default orange
     
     if not points or len(points) < 2:
-        print(f"[LIGHT CONNECTION] ⚠️ Skipping {connection_id} - insufficient points")
+        log(f"[LIGHT CONNECTION] ⚠️ Skipping {connection_id} - insufficient points")
         return None
     
-    print(f"\n[LIGHT CONNECTION] Adding: {connection_id}")
-    print(f"[LIGHT CONNECTION]   Light ID: {light_id}")
-    print(f"[LIGHT CONNECTION]   Points: {len(points)}")
-    print(f"[LIGHT CONNECTION]   Diameter: {diameter}m")
-    print(f"[LIGHT CONNECTION]   Type: {conduit_type}")
+    log(f"\n[LIGHT CONNECTION] Adding: {connection_id}")
+    log(f"[LIGHT CONNECTION]   Light ID: {light_id}")
+    log(f"[LIGHT CONNECTION]   Points: {len(points)}")
+    log(f"[LIGHT CONNECTION]   Diameter: {diameter}m")
+    log(f"[LIGHT CONNECTION]   Type: {conduit_type}")
     
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     
@@ -3629,11 +3647,11 @@ def add_light_connection_to_ifc(
     points_ifc = convert_points_yup_to_ifc(points, origin_tuple, coordinate_mode)
     
     if len(points_ifc) < 2:
-        print(f"[LIGHT CONNECTION] ⚠️ Skipping {connection_id} - insufficient converted points")
+        log(f"[LIGHT CONNECTION] ⚠️ Skipping {connection_id} - insufficient converted points")
         return None
     
-    print(f"[LIGHT CONNECTION]   Start (absolute): {points_ifc[0]}")
-    print(f"[LIGHT CONNECTION]   End (absolute): {points_ifc[-1]}")
+    log(f"[LIGHT CONNECTION]   Start (absolute): {points_ifc[0]}")
+    log(f"[LIGHT CONNECTION]   End (absolute): {points_ifc[-1]}")
     
     # Create circular profile for extrusion
     circle_profile = ifc_file.createIfcCircleProfileDef(
@@ -3884,7 +3902,7 @@ def add_light_connection_to_ifc(
     # 512 samples for bends ensures smooth curves even in faceted IFC viewers
     sampled_points = sample_path_with_catmull_rom(points_ifc, num_segments=512)
     
-    print(f"[LIGHT CONNECTION]   Sampled {len(sampled_points)} points from {len(points_ifc)} control points")
+    log(f"[LIGHT CONNECTION]   Sampled {len(sampled_points)} points from {len(points_ifc)} control points")
     
     # Create circular profile for extrusion (same as pipes)
     circle_profile = ifc_file.createIfcCircleProfileDef(
@@ -3988,10 +4006,10 @@ def add_light_connection_to_ifc(
         segments_created += 1
     
     if not extruded_solids:
-        print(f"[LIGHT CONNECTION] ⚠️ No valid segments created for {connection_id}")
+        log(f"[LIGHT CONNECTION] ⚠️ No valid segments created for {connection_id}")
         return None
     
-    print(f"[LIGHT CONNECTION]   Created {segments_created} extruded segments (total length: {total_length:.3f}m)")
+    log(f"[LIGHT CONNECTION]   Created {segments_created} extruded segments (total length: {total_length:.3f}m)")
     
     # Create the IFC element - use IfcPipeSegment for compatibility
     conduit = ifc_run(
@@ -4043,7 +4061,7 @@ def add_light_connection_to_ifc(
     if color_hex:
         apply_color_to_element(ifc_file, conduit, color_hex)
     
-    print(f"[LIGHT CONNECTION]   ✅ Created successfully with {segments_created} segments approximating smooth curve")
+    log(f"[LIGHT CONNECTION]   ✅ Created successfully with {segments_created} segments approximating smooth curve")
     
     return conduit
 
@@ -4100,7 +4118,7 @@ def create_sign_geometry(
         sign_width = width_mm / 1000
         sign_height = height_mm / 1000
     
-    print(f"[SIGN] Creating sign: shape={shape}, size={sign_width*1000:.0f}x{sign_height*1000:.0f}mm, thickness={thickness*1000:.0f}mm")
+    log(f"[SIGN] Creating sign: shape={shape}, size={sign_width*1000:.0f}x{sign_height*1000:.0f}mm, thickness={thickness*1000:.0f}mm")
     
     # Calculate sign center position
     # Sign is mounted at top of pole, offset by mount_height
@@ -4115,12 +4133,12 @@ def create_sign_geometry(
     # NOTE: We don't pre-calculate sign_center_x/y here because the offset
     # is applied in the plate_placement below using extrude_dir
     
-    print(f"[SIGN] Pole position: ({pos_x:.3f}, {pos_y:.3f}, {pos_z:.3f})")
+    log(f"[SIGN] Pole position: ({pos_x:.3f}, {pos_y:.3f}, {pos_z:.3f})")
     
     # === SIGN PLATE (skip for custom shapes - they only have SVG geometry) ===
     if shape == 'custom':
         plate_profile = None
-        print(f"[SIGN] Custom shape - skipping sign plate (SVG geometry only)")
+        log(f"[SIGN] Custom shape - skipping sign plate (SVG geometry only)")
     elif shape == 'circular':
         # Circular sign plate
         plate_profile = ifc_file.createIfcCircleProfileDef(
@@ -4173,9 +4191,9 @@ def create_sign_geometry(
     perp_dir_x = math.cos(rotation)
     perp_dir_y = math.sin(rotation)
     
-    print(f"[SIGN] Rotation: {rotation:.4f} rad ({math.degrees(rotation):.1f} deg)")
-    print(f"[SIGN] Extrude direction (sign faces): ({extrude_dir_x:.3f}, {extrude_dir_y:.3f})")
-    print(f"[SIGN] Perpendicular direction (left/right): ({perp_dir_x:.3f}, {perp_dir_y:.3f})")
+    log(f"[SIGN] Rotation: {rotation:.4f} rad ({math.degrees(rotation):.1f} deg)")
+    log(f"[SIGN] Extrude direction (sign faces): ({extrude_dir_x:.3f}, {extrude_dir_y:.3f})")
+    log(f"[SIGN] Perpendicular direction (left/right): ({perp_dir_x:.3f}, {perp_dir_y:.3f})")
     
     # Plate placement - back of plate touches pole surface
     # Position is at the back of the plate (pole surface), then extrude outward by thickness
@@ -4200,7 +4218,7 @@ def create_sign_geometry(
         ifc_file.createIfcDirection((perp_dir_x, perp_dir_y, 0.0))  # X-axis = perpendicular (left/right, horizontal)
     )
     
-    print(f"[SIGN] Plate placement: ({pos_x + extrude_dir_x * pole_radius:.3f}, {pos_y + extrude_dir_y * pole_radius:.3f}, {sign_center_z:.3f})")
+    log(f"[SIGN] Plate placement: ({pos_x + extrude_dir_x * pole_radius:.3f}, {pos_y + extrude_dir_y * pole_radius:.3f}, {sign_center_z:.3f})")
     
     # Only create plate solid for non-custom shapes
     if plate_profile is not None:
@@ -4210,7 +4228,7 @@ def create_sign_geometry(
             thickness
         )
         solids.append(plate_solid)
-        print(f"[SIGN] Added sign plate")
+        log(f"[SIGN] Added sign plate")
     
     # === SVG GEOMETRY (extracted shapes from SVG) ===
     # These are returned separately with colors for individual element creation
@@ -4218,7 +4236,7 @@ def create_sign_geometry(
     
     export_geometry = sign_config.get('exportGeometry', [])
     if export_geometry:
-        print(f"[SIGN] Processing {len(export_geometry)} SVG shapes for export")
+        log(f"[SIGN] Processing {len(export_geometry)} SVG shapes for export")
         
         svg_solids_created = 0
         for geom_idx, geom in enumerate(export_geometry):
@@ -4323,12 +4341,12 @@ def create_sign_geometry(
                 svg_solids_created += 1
                 
             except Exception as e:
-                print(f"[SIGN] Warning: Failed to create SVG shape {geom_idx}: {e}")
+                log(f"[SIGN] Warning: Failed to create SVG shape {geom_idx}: {e}")
                 continue
         
-        print(f"[SIGN] Created {svg_solids_created} SVG geometry solids with colors")
+        log(f"[SIGN] Created {svg_solids_created} SVG geometry solids with colors")
     else:
-        print(f"[SIGN] No exportGeometry found - sign will have plate only")
+        log(f"[SIGN] No exportGeometry found - sign will have plate only")
     
     # === SIGN BORDER (if configured) ===
     if border_width > 0.001 and shape != 'custom':
@@ -4459,7 +4477,7 @@ def create_sign_geometry(
             )
             solids.append(right_solid)
         
-        print(f"[SIGN] Added sign border")
+        log(f"[SIGN] Added sign border")
     
     # Return both the main solids (plate, border, straps) and the colored SVG shapes
     return solids, svg_shapes_with_colors
@@ -4508,10 +4526,10 @@ def add_public_light_to_ifc(
         ifc_pos = convert_point_yup_to_ifc(threejs_pos, origin_tuple, coordinate_mode)
         pos_x, pos_y, pos_z = ifc_pos[0], ifc_pos[1], ifc_pos[2]
         
-        print(f"[PUBLIC LIGHT] Creating light {reference_id}")
-        print(f"[PUBLIC LIGHT]   Three.js position: ({threejs_pos[0]:.3f}, {threejs_pos[1]:.3f}, {threejs_pos[2]:.3f})")
-        print(f"[PUBLIC LIGHT]   IFC position: ({pos_x:.3f}, {pos_y:.3f}, {pos_z:.3f})")
-        print(f"[PUBLIC LIGHT]   Rotation: {rotation:.3f} rad ({math.degrees(rotation):.1f} deg)")
+        log(f"[PUBLIC LIGHT] Creating light {reference_id}")
+        log(f"[PUBLIC LIGHT]   Three.js position: ({threejs_pos[0]:.3f}, {threejs_pos[1]:.3f}, {threejs_pos[2]:.3f})")
+        log(f"[PUBLIC LIGHT]   IFC position: ({pos_x:.3f}, {pos_y:.3f}, {pos_z:.3f})")
+        log(f"[PUBLIC LIGHT]   Rotation: {rotation:.3f} rad ({math.degrees(rotation):.1f} deg)")
         
         # Pole configuration
         pole_height = pole_config.get('height', 10)  # meters
@@ -4523,8 +4541,8 @@ def add_public_light_to_ifc(
         # Get housing color for the fixture (use this as the main color for the light element)
         housing_color = fixture_config.get('housingColor', '#404040')
         
-        print(f"[PUBLIC LIGHT]   Pole: height={pole_height}m, diameter={pole_diameter*1000:.0f}mm, taper={taper_ratio}, base={base_type}")
-        print(f"[PUBLIC LIGHT]   Pole color: {pole_color}, Housing color: {housing_color}")
+        log(f"[PUBLIC LIGHT]   Pole: height={pole_height}m, diameter={pole_diameter*1000:.0f}mm, taper={taper_ratio}, base={base_type}")
+        log(f"[PUBLIC LIGHT]   Pole color: {pole_color}, Housing color: {housing_color}")
         
         # Calculate top and bottom radii for tapered pole
         bottom_radius = pole_diameter / 2
@@ -4572,7 +4590,7 @@ def add_public_light_to_ifc(
             baseplate_shape = pole_config.get('baseplateShape', 'rectangular')
             baseplate_thickness = pole_config.get('baseplateThickness', 20) / 1000  # mm to m
             
-            print(f"[PUBLIC LIGHT]   Baseplate: shape={baseplate_shape}, thickness={baseplate_thickness*1000:.0f}mm")
+            log(f"[PUBLIC LIGHT]   Baseplate: shape={baseplate_shape}, thickness={baseplate_thickness*1000:.0f}mm")
             
             if baseplate_shape == 'circular':
                 plate_diameter = pole_config.get('baseplateDiameter', 500) / 1000  # mm to m
@@ -4619,7 +4637,7 @@ def add_public_light_to_ifc(
                 gusset_thickness = pole_config.get('gussetThickness', 10) / 1000  # mm to m
                 gusset_length = pole_config.get('gussetLength', 150) / 1000  # mm to m
                 
-                print(f"[PUBLIC LIGHT]   Adding {gusset_count} stiffener gussets (h={gusset_height*1000:.0f}mm, t={gusset_thickness*1000:.0f}mm, l={gusset_length*1000:.0f}mm)")
+                log(f"[PUBLIC LIGHT]   Adding {gusset_count} stiffener gussets (h={gusset_height*1000:.0f}mm, t={gusset_thickness*1000:.0f}mm, l={gusset_length*1000:.0f}mm)")
                 
                 for g in range(gusset_count):
                     gusset_angle = (g / gusset_count) * 2 * math.pi + rotation
@@ -4666,7 +4684,7 @@ def add_public_light_to_ifc(
             thread_protrusion = bolt_diameter * 0.5
             
             # Calculate bolt positions - must match Three.js positioning
-            print(f"[PUBLIC LIGHT]   Adding {bolt_count} anchor bolts with washers and hex nuts")
+            log(f"[PUBLIC LIGHT]   Adding {bolt_count} anchor bolts with washers and hex nuts")
             
             for i in range(bolt_count):
                 # Calculate local bolt position (relative to pole center)
@@ -4811,7 +4829,7 @@ def add_public_light_to_ifc(
                 )
                 solids.append(nut_solid)
             
-            print(f"[PUBLIC LIGHT]   Added {bolt_count} complete bolt assemblies (shaft + washer + hex nut)")
+            log(f"[PUBLIC LIGHT]   Added {bolt_count} complete bolt assemblies (shaft + washer + hex nut)")
         
         # === CONCRETE FOUNDATION ===
         elif base_type == 'concrete-foundation':
@@ -4864,7 +4882,7 @@ def add_public_light_to_ifc(
                 baseplate_shape = pole_config.get('baseplateShape', 'rectangular')
                 baseplate_thickness = pole_config.get('baseplateThickness', 20) / 1000  # mm to m
                 
-                print(f"[PUBLIC LIGHT]   Foundation baseplate: shape={baseplate_shape}, thickness={baseplate_thickness*1000:.0f}mm")
+                log(f"[PUBLIC LIGHT]   Foundation baseplate: shape={baseplate_shape}, thickness={baseplate_thickness*1000:.0f}mm")
                 
                 if baseplate_shape == 'circular':
                     plate_diameter = pole_config.get('baseplateDiameter', 500) / 1000
@@ -4907,7 +4925,7 @@ def add_public_light_to_ifc(
                     gusset_thickness = pole_config.get('gussetThickness', 10) / 1000
                     gusset_length = pole_config.get('gussetLength', 150) / 1000
                     
-                    print(f"[PUBLIC LIGHT]   Adding {gusset_count} foundation baseplate gussets")
+                    log(f"[PUBLIC LIGHT]   Adding {gusset_count} foundation baseplate gussets")
                     
                     for g in range(gusset_count):
                         gusset_angle = (g / gusset_count) * 2 * math.pi + rotation
@@ -4945,7 +4963,7 @@ def add_public_light_to_ifc(
                 washer_outer_diameter = bolt_head_diameter * 1.3
                 washer_thickness = bolt_diameter * 0.15
                 
-                print(f"[PUBLIC LIGHT]   Adding {bolt_count} foundation baseplate bolts")
+                log(f"[PUBLIC LIGHT]   Adding {bolt_count} foundation baseplate bolts")
                 
                 for i in range(bolt_count):
                     local_bolt_x = 0.0
@@ -5053,13 +5071,13 @@ def add_public_light_to_ifc(
         element_type = light_data.get('type', 'light')
         sign_config = light_data.get('signConfig')
         
-        print(f"[PUBLIC LIGHT]   Element type: '{element_type}', has signConfig: {sign_config is not None}")
+        log(f"[PUBLIC LIGHT]   Element type: '{element_type}', has signConfig: {sign_config is not None}")
         if sign_config:
-            print(f"[PUBLIC LIGHT]   Sign config shape: {sign_config.get('shape')}, width: {sign_config.get('width')}, height: {sign_config.get('height')}")
+            log(f"[PUBLIC LIGHT]   Sign config shape: {sign_config.get('shape')}, width: {sign_config.get('width')}, height: {sign_config.get('height')}")
         
         if element_type == 'sign' and sign_config:
             # This is a sign - create sign geometry instead of fixture
-            print(f"[SIGN] Creating sign with rotation: {rotation:.4f} rad ({math.degrees(rotation):.1f} deg)")
+            log(f"[SIGN] Creating sign with rotation: {rotation:.4f} rad ({math.degrees(rotation):.1f} deg)")
             # Returns (main_solids, svg_shapes_with_colors)
             sign_solids, svg_shapes_with_colors = create_sign_geometry(
                 ifc_file,
@@ -5141,7 +5159,7 @@ def add_public_light_to_ifc(
                         [ifc_file.createIfcPresentationStyleAssignment([surface_style])],
                         None
                     )
-                print(f"[COLOR] Applied {color_hex} to {len(solids_list)} {component_name} parts")
+                log(f"[COLOR] Applied {color_hex} to {len(solids_list)} {component_name} parts")
             
             # Apply pole color
             if pole_solids and pole_color:
@@ -5170,7 +5188,7 @@ def add_public_light_to_ifc(
                         color_groups[svg_color] = []
                     color_groups[svg_color].append(svg_solid)
                 
-                print(f"[SIGN] Processing {len(svg_shapes_with_colors)} SVG shapes in {len(color_groups)} color groups")
+                log(f"[SIGN] Processing {len(svg_shapes_with_colors)} SVG shapes in {len(color_groups)} color groups")
                 
                 # Create styled representations for each color group
                 for svg_color, svg_solids in color_groups.items():
@@ -5198,10 +5216,10 @@ def add_public_light_to_ifc(
                                 None
                             )
                         
-                        print(f"[COLOR] Applied color {svg_color} to {len(svg_solids)} SVG shapes")
+                        log(f"[COLOR] Applied color {svg_color} to {len(svg_solids)} SVG shapes")
                         
                     except Exception as e:
-                        print(f"[SIGN] Warning: Failed to apply color {svg_color}: {e}")
+                        log(f"[SIGN] Warning: Failed to apply color {svg_color}: {e}")
                         continue
                 
                 # Add all SVG solids to the main element's representation
@@ -5224,7 +5242,7 @@ def add_public_light_to_ifc(
                 
                 sign_element.Representation = combined_product_shape
             
-            print(f"[PUBLIC LIGHT]   ✅ Sign created successfully with {len(solids)} base parts + {len(svg_shapes_with_colors)} colored graphics")
+            log(f"[PUBLIC LIGHT]   ✅ Sign created successfully with {len(solids)} base parts + {len(svg_shapes_with_colors)} colored graphics")
             
             return sign_element
         
@@ -5233,7 +5251,7 @@ def add_public_light_to_ifc(
         arm_angle = fixture_config.get('armAngle', 0)  # degrees (downward angle from horizontal)
         arm_diameter = fixture_config.get('armDiameter', 60) / 1000  # mm to m
         
-        print(f"[PUBLIC LIGHT]   Fixture arm: length={arm_length*1000:.0f}mm, angle={arm_angle}deg, diameter={arm_diameter*1000:.0f}mm")
+        log(f"[PUBLIC LIGHT]   Fixture arm: length={arm_length*1000:.0f}mm, angle={arm_angle}deg, diameter={arm_diameter*1000:.0f}mm")
         
         # Variables to track arm end position for fixture placement
         arm_end_x = pos_x
@@ -5277,8 +5295,8 @@ def add_public_light_to_ifc(
             mir_arm_end_y = pos_y - arm_dir_y * arm_length
             mir_arm_end_z = arm_end_z
             
-            print(f"[PUBLIC LIGHT]   Arm direction: ({arm_dir_x:.3f}, {arm_dir_y:.3f}, {arm_dir_z:.3f})")
-            print(f"[PUBLIC LIGHT]   Arm end position: ({arm_end_x:.3f}, {arm_end_y:.3f}, {arm_end_z:.3f})")
+            log(f"[PUBLIC LIGHT]   Arm direction: ({arm_dir_x:.3f}, {arm_dir_y:.3f}, {arm_dir_z:.3f})")
+            log(f"[PUBLIC LIGHT]   Arm end position: ({arm_end_x:.3f}, {arm_end_y:.3f}, {arm_end_z:.3f})")
             
             arm_profile = ifc_file.createIfcCircleProfileDef(
                 "AREA",
@@ -5319,7 +5337,7 @@ def add_public_light_to_ifc(
                 arm_length
             )
             solids.append(arm_solid)
-            print(f"[PUBLIC LIGHT]   Added arm geometry")
+            log(f"[PUBLIC LIGHT]   Added arm geometry")
 
             _style_key = fixture_config.get('style', 'shoebox').lower().replace('_', '').replace('-', '')
             if fixture_config.get('mirroredTopFixture', False) and _style_key in ('shoebox', 'cobrahead'):
@@ -5351,7 +5369,7 @@ def add_public_light_to_ifc(
                     arm_length
                 )
                 solids.append(arm_mir_solid)
-                print(f"[PUBLIC LIGHT]   Added opposite-side arm geometry (pole mirror)")
+                log(f"[PUBLIC LIGHT]   Added opposite-side arm geometry (pole mirror)")
         
         # === FIXTURE HOUSING ===
         fixture_style = fixture_config.get('style', 'shoebox')
@@ -5365,14 +5383,14 @@ def add_public_light_to_ifc(
         fixture_height = dimensions.get('height', 300) / 1000  # mm to m
         fixture_depth = dimensions.get('depth', 400) / 1000  # mm to m
         
-        print(f"[PUBLIC LIGHT]   Fixture: style={fixture_style}, count={fixture_count}, dims=({fixture_width*1000:.0f}x{fixture_height*1000:.0f}x{fixture_depth*1000:.0f})mm")
+        log(f"[PUBLIC LIGHT]   Fixture: style={fixture_style}, count={fixture_count}, dims=({fixture_width*1000:.0f}x{fixture_height*1000:.0f}x{fixture_depth*1000:.0f})mm")
         
         for i in range(fixture_count):
             # Calculate fixture position - at end of arm, or on top of pole
             fixture_x = arm_end_x + math.cos(rotation) * fixture_spacing * i
             fixture_y = arm_end_y + math.sin(rotation) * fixture_spacing * i
             
-            print(f"[PUBLIC LIGHT]   Fixture {i+1} at ({fixture_x:.3f}, {fixture_y:.3f}), style={fixture_style}")
+            log(f"[PUBLIC LIGHT]   Fixture {i+1} at ({fixture_x:.3f}, {fixture_y:.3f}), style={fixture_style}")
             
             if fixture_style == 'post-top':
                 # Post-top: Globe/sphere on top of pole with base cap
@@ -5381,7 +5399,7 @@ def add_public_light_to_ifc(
                 globe_radius = fixture_width / 2
                 cap_height = globe_radius * 0.3
                 
-                print(f"[PUBLIC LIGHT]   Post-top globe: radius={globe_radius*1000:.0f}mm")
+                log(f"[PUBLIC LIGHT]   Post-top globe: radius={globe_radius*1000:.0f}mm")
                 
                 # 1. Base cap (tapered cylinder below globe)
                 cap_bottom_radius = globe_radius * 1.1
@@ -5442,7 +5460,7 @@ def add_public_light_to_ifc(
                     )
                     solids.append(seg_solid)
                 
-                print(f"[PUBLIC LIGHT]   Added post-top geometry (cap + globe sphere)")
+                log(f"[PUBLIC LIGHT]   Added post-top geometry (cap + globe sphere)")
                 
             elif fixture_style == 'decorative-lantern':
                 # Decorative lantern: hexagonal body, cone roof, finial, bottom cap
@@ -5458,7 +5476,7 @@ def add_public_light_to_ifc(
                 body_top_radius = body_radius * 0.9
                 roof_radius = body_radius * 1.2
                 
-                print(f"[PUBLIC LIGHT]   Lantern body: height={body_height*1000:.0f}mm, radius={body_radius*1000:.0f}mm")
+                log(f"[PUBLIC LIGHT]   Lantern body: height={body_height*1000:.0f}mm, radius={body_radius*1000:.0f}mm")
                 
                 # 1. Bottom cap (tapered cylinder)
                 bottom_cap_profile = ifc_file.createIfcCircleProfileDef(
@@ -5563,7 +5581,7 @@ def add_public_light_to_ifc(
                     )
                     solids.append(seg_solid)
                 
-                print(f"[PUBLIC LIGHT]   Added decorative lantern geometry (bottom cap + hex body + cone roof + finial)")
+                log(f"[PUBLIC LIGHT]   Added decorative lantern geometry (bottom cap + hex body + cone roof + finial)")
                 
             elif fixture_style == 'flood':
                 # Flood light - rectangular box angled downward (simplified as box for now)
@@ -5588,7 +5606,7 @@ def add_public_light_to_ifc(
                     fixture_height
                 )
                 solids.append(fixture_solid)
-                print(f"[PUBLIC LIGHT]   Added flood light geometry")
+                log(f"[PUBLIC LIGHT]   Added flood light geometry")
                 
             else:
                 # Default shoebox style - rectangular box hanging below arm
@@ -5613,7 +5631,7 @@ def add_public_light_to_ifc(
                     fixture_height
                 )
                 solids.append(fixture_solid)
-                print(f"[PUBLIC LIGHT]   Added shoebox geometry")
+                log(f"[PUBLIC LIGHT]   Added shoebox geometry")
 
                 if mirrored_top_fixture and arm_length > 0.001:
                     # Second shoebox on opposite side of pole (same as Three.js pole-axis mirror)
@@ -5632,7 +5650,7 @@ def add_public_light_to_ifc(
                         fixture_height
                     )
                     solids.append(mir_solid)
-                    print(f"[PUBLIC LIGHT]   Added opposite-side shoebox geometry (pole mirror)")
+                    log(f"[PUBLIC LIGHT]   Added opposite-side shoebox geometry (pole mirror)")
         
         # Create the IFC element - use IfcLightFixture
         light_element = ifc_run(
@@ -5706,7 +5724,7 @@ def add_public_light_to_ifc(
                     [ifc_file.createIfcPresentationStyleAssignment([surface_style])],
                     None
                 )
-            print(f"[COLOR] Applied {color_hex} to {len(solids_list)} {component_name} parts")
+            log(f"[COLOR] Applied {color_hex} to {len(solids_list)} {component_name} parts")
         
         # Apply pole color
         if pole_solids and pole_color:
@@ -5726,12 +5744,12 @@ def add_public_light_to_ifc(
         if fixture_solids and housing_color:
             apply_color_to_solids(fixture_solids, housing_color, "fixture")
         
-        print(f"[PUBLIC LIGHT]   ✅ Created successfully with {len(solids)} geometry parts")
+        log(f"[PUBLIC LIGHT]   ✅ Created successfully with {len(solids)} geometry parts")
         
         return light_element
         
     except Exception as error:
-        print(f"[PUBLIC LIGHT] ❌ Error creating light {light_data.get('id', 'unknown')}: {error}")
+        log(f"[PUBLIC LIGHT] ❌ Error creating light {light_data.get('id', 'unknown')}: {error}")
         import traceback
         traceback.print_exc()
         return None
@@ -5752,8 +5770,8 @@ def add_hardstanding_to_ifc(
     area_name = hardstanding_data.get("name", area_id)
     components = hardstanding_data.get("components", [])
 
-    print(f"\n[HARDSTANDING] Adding area: {area_name}")
-    print(f"[HARDSTANDING]   Components: {len(components)}")
+    log(f"\n[HARDSTANDING] Adding area: {area_name}")
+    log(f"[HARDSTANDING]   Components: {len(components)}")
 
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     created_elements = []
@@ -5781,7 +5799,7 @@ def add_hardstanding_to_ifc(
         if source_type:
             element_name += f"_{source_type}"
 
-        print(
+        log(
             f"[HARDSTANDING]   Component {comp_idx + 1}/{total_components}: "
             f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
         )
@@ -5794,7 +5812,7 @@ def add_hardstanding_to_ifc(
             )
 
         if len(vertices) < 3 or len(indices) < 3:
-            print(f"[HARDSTANDING]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            log(f"[HARDSTANDING]   ⚠️ Skipping {comp_type}: insufficient geometry")
             continue
 
         ifc_comp_type = comp_type_to_ifc.get(comp_type, "hardstanding")
@@ -5811,11 +5829,11 @@ def add_hardstanding_to_ifc(
         )
         if element:
             created_elements.append(element)
-            print(f"[HARDSTANDING]   ✅ Created {comp_type} element: {element_name}")
+            log(f"[HARDSTANDING]   ✅ Created {comp_type} element: {element_name}")
         else:
-            print(f"[HARDSTANDING]   ⚠️ Failed to create {comp_type} element: {element_name}")
+            log(f"[HARDSTANDING]   ⚠️ Failed to create {comp_type} element: {element_name}")
 
-    print(f"[HARDSTANDING]   ✅ Area created with {len(created_elements)} elements")
+    log(f"[HARDSTANDING]   ✅ Area created with {len(created_elements)} elements")
     return created_elements
 
 
@@ -5835,8 +5853,8 @@ def add_drainage_elements_to_ifc(
     element_type = element_data.get("elementType", "drainage")
     components = element_data.get("components", [])
 
-    print(f"\n[DRAINAGE] Adding element: {element_name} ({element_type})")
-    print(f"[DRAINAGE]   Components: {len(components)}")
+    log(f"\n[DRAINAGE] Adding element: {element_name} ({element_type})")
+    log(f"[DRAINAGE]   Components: {len(components)}")
 
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     created_elements = []
@@ -5862,7 +5880,7 @@ def add_drainage_elements_to_ifc(
         if part_name:
             mesh_label += f"_{part_name}"
 
-        print(
+        log(
             f"[DRAINAGE]   Component {comp_idx + 1}/{total_components}: "
             f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
         )
@@ -5875,7 +5893,7 @@ def add_drainage_elements_to_ifc(
             )
 
         if len(vertices) < 3 or len(indices) < 3:
-            print(f"[DRAINAGE]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            log(f"[DRAINAGE]   ⚠️ Skipping {comp_type}: insufficient geometry")
             continue
 
         ifc_comp_type = comp_type_to_ifc.get(comp_type, element_type)
@@ -5892,11 +5910,11 @@ def add_drainage_elements_to_ifc(
         )
         if mesh_element:
             created_elements.append(mesh_element)
-            print(f"[DRAINAGE]   ✅ Created {comp_type} element: {mesh_label}")
+            log(f"[DRAINAGE]   ✅ Created {comp_type} element: {mesh_label}")
         else:
-            print(f"[DRAINAGE]   ⚠️ Failed to create {comp_type} element: {mesh_label}")
+            log(f"[DRAINAGE]   ⚠️ Failed to create {comp_type} element: {mesh_label}")
 
-    print(f"[DRAINAGE]   ✅ Element created with {len(created_elements)} mesh parts")
+    log(f"[DRAINAGE]   ✅ Element created with {len(created_elements)} mesh parts")
     return created_elements
 
 
@@ -5927,8 +5945,8 @@ def add_retaining_wall_to_ifc(
     metadata = wall_data.get("metadata") or {}
     components = wall_data.get("components", [])
 
-    print(f"\n[RETAINING WALL] Adding wall: {wall_name} ({wall_type})")
-    print(f"[RETAINING WALL]   Components: {len(components)}")
+    log(f"\n[RETAINING WALL] Adding wall: {wall_name} ({wall_type})")
+    log(f"[RETAINING WALL]   Components: {len(components)}")
 
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     created_elements = []
@@ -5945,7 +5963,7 @@ def add_retaining_wall_to_ifc(
         if part_name and total_components > 1:
             mesh_label += f"_{part_name}"
 
-        print(
+        log(
             f"[RETAINING WALL]   Component {comp_idx + 1}/{total_components} ({comp_type}): "
             f"{len(vertices)} vertices, {len(indices)} indices"
         )
@@ -5958,7 +5976,7 @@ def add_retaining_wall_to_ifc(
             )
 
         if len(vertices) < 3 or len(indices) < 3:
-            print(f"[RETAINING WALL]   ⚠️ Skipping component: insufficient geometry")
+            log(f"[RETAINING WALL]   ⚠️ Skipping component: insufficient geometry")
             continue
 
         # Each part maps to its own IFC class in create_road_mesh_element:
@@ -5976,7 +5994,7 @@ def add_retaining_wall_to_ifc(
             comp_type,
         )
         if not element:
-            print(f"[RETAINING WALL]   ⚠️ Failed to create element: {mesh_label}")
+            log(f"[RETAINING WALL]   ⚠️ Failed to create element: {mesh_label}")
             continue
 
         try:
@@ -6014,12 +6032,12 @@ def add_retaining_wall_to_ifc(
                 "WeepHoleCount": metadata.get("weepHoleCount"),
             })
         except Exception as e:
-            print(f"[RETAINING WALL]   ⚠️ WARNING: Could not apply wall properties: {e}")
+            log(f"[RETAINING WALL]   ⚠️ WARNING: Could not apply wall properties: {e}")
 
         created_elements.append(element)
-        print(f"[RETAINING WALL]   ✅ Created wall element: {mesh_label} ({comp_type})")
+        log(f"[RETAINING WALL]   ✅ Created wall element: {mesh_label} ({comp_type})")
 
-    print(f"[RETAINING WALL]   ✅ Wall created with {len(created_elements)} mesh parts")
+    log(f"[RETAINING WALL]   ✅ Wall created with {len(created_elements)} mesh parts")
     return created_elements
 
 
@@ -6056,8 +6074,8 @@ def add_site_mesh_element_to_ifc(
     metadata = element_data.get("metadata") or {}
     components = element_data.get("components", [])
 
-    print(f"\n[SITE MESH] Adding element: {element_name} ({element_type})")
-    print(f"[SITE MESH]   Components: {len(components)}")
+    log(f"\n[SITE MESH] Adding element: {element_name} ({element_type})")
+    log(f"[SITE MESH]   Components: {len(components)}")
 
     origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
     created_elements = []
@@ -6074,7 +6092,7 @@ def add_site_mesh_element_to_ifc(
         if total_components > 1:
             mesh_label += f"_{part_name or comp_type}_{comp_idx + 1}"
 
-        print(
+        log(
             f"[SITE MESH]   Component {comp_idx + 1}/{total_components}: "
             f"{comp_type} - {len(vertices)} vertices, {len(indices)} indices"
         )
@@ -6087,7 +6105,7 @@ def add_site_mesh_element_to_ifc(
             )
 
         if len(vertices) < 3 or len(indices) < 3:
-            print(f"[SITE MESH]   ⚠️ Skipping {comp_type}: insufficient geometry")
+            log(f"[SITE MESH]   ⚠️ Skipping {comp_type}: insufficient geometry")
             continue
 
         element = create_road_mesh_element(
@@ -6102,7 +6120,7 @@ def add_site_mesh_element_to_ifc(
             comp_type,
         )
         if not element:
-            print(f"[SITE MESH]   ⚠️ Failed to create element: {mesh_label}")
+            log(f"[SITE MESH]   ⚠️ Failed to create element: {mesh_label}")
             continue
 
         try:
@@ -6116,12 +6134,12 @@ def add_site_mesh_element_to_ifc(
                 pset_values[str(key)[:1].upper() + str(key)[1:]] = value
             add_custom_property_set(ifc_file, element, "Pset_InfraGridSiteElement", pset_values)
         except Exception as e:
-            print(f"[SITE MESH]   ⚠️ WARNING: Could not apply site element properties: {e}")
+            log(f"[SITE MESH]   ⚠️ WARNING: Could not apply site element properties: {e}")
 
         created_elements.append(element)
-        print(f"[SITE MESH]   ✅ Created {comp_type} element: {mesh_label}")
+        log(f"[SITE MESH]   ✅ Created {comp_type} element: {mesh_label}")
 
-    print(f"[SITE MESH]   ✅ Element created with {len(created_elements)} mesh parts")
+    log(f"[SITE MESH]   ✅ Element created with {len(created_elements)} mesh parts")
     return created_elements
 
 
@@ -6168,15 +6186,15 @@ def export_chambers_to_ifc(
         retaining_wall_count = len(retaining_walls_data) if retaining_walls_data else 0
         site_mesh_count = len(site_mesh_elements_data) if site_mesh_elements_data else 0
         total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count + retaining_wall_count + site_mesh_count
-        print(
+        log(
             f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, {drainage_count} drainage elements, {retaining_wall_count} retaining walls, and {site_mesh_count} site mesh elements"
         )
 
         coordinate_mode = (coordinate_mode or "absolute").lower()
         if coordinate_mode not in ("absolute", "project"):
-            print(f"[EXPORT] ⚠️ Unknown coordinate_mode '{coordinate_mode}', defaulting to 'absolute'")
+            log(f"[EXPORT] ⚠️ Unknown coordinate_mode '{coordinate_mode}', defaulting to 'absolute'")
             coordinate_mode = "absolute"
-        print(f"[EXPORT] Coordinate mode: {coordinate_mode.upper()}")
+        log(f"[EXPORT] Coordinate mode: {coordinate_mode.upper()}")
 
         origin_tuple = get_project_origin_tuple(project_coords)
 
@@ -6193,7 +6211,7 @@ def export_chambers_to_ifc(
         # Export chambers
         current_item = 0
         for index, chamber in enumerate(chambers_data, start=1):
-            print(
+            log(
                 f"[EXPORT] Adding chamber {index}/{chamber_count}: {chamber.get('name', chamber.get('id'))}"
             )
             add_chamber_to_ifc(
@@ -6217,7 +6235,7 @@ def export_chambers_to_ifc(
         
         if pipes_data:
             for index, pipe in enumerate(pipes_data, start=1):
-                print(f"[EXPORT] Adding pipe {index}/{pipe_count}: {pipe.get('pipeId', 'Pipe')}")
+                log(f"[EXPORT] Adding pipe {index}/{pipe_count}: {pipe.get('pipeId', 'Pipe')}")
                 result = add_pipe_to_ifc(
                     ifc_file,
                     storey,
@@ -6239,17 +6257,17 @@ def export_chambers_to_ifc(
                 if progress_callback:
                     progress_callback("pipes", current_item, total_items, f"Added pipe {index}/{pipe_count}")
             
-            print(f"\n[EXPORT] ═══ PIPE SUMMARY ═══")
-            print(f"[EXPORT] Total pipes requested: {pipe_count}")
-            print(f"[EXPORT] Pipes created: {pipes_created}")
-            print(f"[EXPORT] Pipes skipped: {pipes_skipped}")
-            print(f"[EXPORT] Breakdown: {straight_count} straights, {bend_count} bends")
-            print(f"[EXPORT] ═══════════════════\n")
+            log(f"\n[EXPORT] ═══ PIPE SUMMARY ═══")
+            log(f"[EXPORT] Total pipes requested: {pipe_count}")
+            log(f"[EXPORT] Pipes created: {pipes_created}")
+            log(f"[EXPORT] Pipes skipped: {pipes_skipped}")
+            log(f"[EXPORT] Breakdown: {straight_count} straights, {bend_count} bends")
+            log(f"[EXPORT] ═══════════════════\n")
 
         # Export cable trays
         if cable_trays_data:
             for index, tray in enumerate(cable_trays_data, start=1):
-                print(
+                log(
                     f"[EXPORT] Adding cable tray {index}/{tray_count}: {tray.get('trayId', 'CableTray')}"
                 )
                 add_cable_tray_to_ifc(
@@ -6268,7 +6286,7 @@ def export_chambers_to_ifc(
         # Export hangers
         if hangers_data:
             for index, hanger in enumerate(hangers_data, start=1):
-                print(
+                log(
                     f"[EXPORT] Adding hanger {index}/{hanger_count}: {hanger.get('hangerId', 'Hanger')}"
                 )
                 add_hanger_to_ifc(
@@ -6292,7 +6310,7 @@ def export_chambers_to_ifc(
                 light_ref = light.get('referenceId') or light.get('id', 'Light')
                 element_type = light.get('type', 'light')
                 type_label = 'sign' if element_type == 'sign' else 'light'
-                print(
+                log(
                     f"[EXPORT] Adding public {type_label} {index}/{public_light_count}: {light_ref}"
                 )
                 result = add_public_light_to_ifc(
@@ -6313,17 +6331,17 @@ def export_chambers_to_ifc(
                 if progress_callback:
                     progress_callback("public_lights", current_item, total_items, f"Added public {type_label} {index}/{public_light_count}")
             
-            print(f"\n[EXPORT] ═══ PUBLIC LIGHT/SIGN SUMMARY ═══")
-            print(f"[EXPORT] Total elements requested: {public_light_count}")
-            print(f"[EXPORT] Lights created: {public_lights_created}")
-            print(f"[EXPORT] Signs created: {signs_created}")
-            print(f"[EXPORT] ═════════════════════════════════\n")
+            log(f"\n[EXPORT] ═══ PUBLIC LIGHT/SIGN SUMMARY ═══")
+            log(f"[EXPORT] Total elements requested: {public_light_count}")
+            log(f"[EXPORT] Lights created: {public_lights_created}")
+            log(f"[EXPORT] Signs created: {signs_created}")
+            log(f"[EXPORT] ═════════════════════════════════\n")
 
         # Export light connections (public lighting conduits)
         light_connections_created = 0
         if light_connections_data:
             for index, connection in enumerate(light_connections_data, start=1):
-                print(
+                log(
                     f"[EXPORT] Adding light connection {index}/{light_connection_count}: {connection.get('connectionId', 'LightConnection')}"
                 )
                 result = add_light_connection_to_ifc(
@@ -6341,17 +6359,17 @@ def export_chambers_to_ifc(
                 if progress_callback:
                     progress_callback("light_connections", current_item, total_items, f"Added light connection {index}/{light_connection_count}")
             
-            print(f"\n[EXPORT] ═══ LIGHT CONNECTION SUMMARY ═══")
-            print(f"[EXPORT] Total light connections requested: {light_connection_count}")
-            print(f"[EXPORT] Light connections created: {light_connections_created}")
-            print(f"[EXPORT] ═══════════════════════════════\n")
+            log(f"\n[EXPORT] ═══ LIGHT CONNECTION SUMMARY ═══")
+            log(f"[EXPORT] Total light connections requested: {light_connection_count}")
+            log(f"[EXPORT] Light connections created: {light_connections_created}")
+            log(f"[EXPORT] ═══════════════════════════════\n")
 
         # Export roads (carriageway, kerbs, footways, bedding, haunch)
         roads_created = 0
         road_components_created = 0
         if roads_data:
             for index, road in enumerate(roads_data, start=1):
-                print(
+                log(
                     f"[EXPORT] Adding road {index}/{road_count}: {road.get('name', road.get('roadId', 'Road'))}"
                 )
                 # Create a component-level progress callback for this road
@@ -6392,18 +6410,18 @@ def export_chambers_to_ifc(
                 if progress_callback:
                     progress_callback("roads", current_item, total_items, f"Completed road {index}/{road_count} ({road_component_count} components)")
             
-            print(f"\n[EXPORT] ═══ ROAD SUMMARY ═══")
-            print(f"[EXPORT] Total roads requested: {road_count}")
-            print(f"[EXPORT] Roads created: {roads_created}")
-            print(f"[EXPORT] Road components created: {road_components_created}")
-            print(f"[EXPORT] ═════════════════════\n")
+            log(f"\n[EXPORT] ═══ ROAD SUMMARY ═══")
+            log(f"[EXPORT] Total roads requested: {road_count}")
+            log(f"[EXPORT] Roads created: {roads_created}")
+            log(f"[EXPORT] Road components created: {road_components_created}")
+            log(f"[EXPORT] ═════════════════════\n")
 
         # Export hardstanding areas (paved surfaces, kerbs, build-up layers)
         hardstandings_created = 0
         hardstanding_components_created = 0
         if hardstandings_data:
             for index, hardstanding in enumerate(hardstandings_data, start=1):
-                print(
+                log(
                     f"[EXPORT] Adding hardstanding {index}/{hardstanding_count}: "
                     f"{hardstanding.get('name', hardstanding.get('areaId', 'Hardstanding'))}"
                 )
@@ -6441,19 +6459,19 @@ def export_chambers_to_ifc(
                         f"Completed hardstanding {index}/{hardstanding_count} ({len(components)} components)",
                     )
 
-            print(f"\n[EXPORT] ═══ HARDSTANDING SUMMARY ═══")
-            print(f"[EXPORT] Total hardstandings requested: {hardstanding_count}")
-            print(f"[EXPORT] Hardstandings created: {hardstandings_created}")
-            print(f"[EXPORT] Hardstanding components created: {hardstanding_components_created}")
-            print(f"[EXPORT] ═══════════════════════════\n")
+            log(f"\n[EXPORT] ═══ HARDSTANDING SUMMARY ═══")
+            log(f"[EXPORT] Total hardstandings requested: {hardstanding_count}")
+            log(f"[EXPORT] Hardstandings created: {hardstandings_created}")
+            log(f"[EXPORT] Hardstanding components created: {hardstanding_components_created}")
+            log(f"[EXPORT] ═══════════════════════════\n")
 
         # Export drainage mesh elements (ACO channels, BWH covers, saddle connections)
         drainage_elements_created = 0
         drainage_components_created = 0
         if drainage_elements_data:
             drainage_count = len(drainage_elements_data)
-            print(f"\n[EXPORT] ═══ DRAINAGE ELEMENTS ═══")
-            print(f"[EXPORT] Total drainage elements requested: {drainage_count}")
+            log(f"\n[EXPORT] ═══ DRAINAGE ELEMENTS ═══")
+            log(f"[EXPORT] Total drainage elements requested: {drainage_count}")
 
             for index, element in enumerate(drainage_elements_data, start=1):
                 element_name = element.get("name", element.get("elementId", "Drainage"))
@@ -6491,18 +6509,18 @@ def export_chambers_to_ifc(
                         f"Completed drainage element {index}/{drainage_count} ({len(components)} components)",
                     )
 
-            print(f"\n[EXPORT] ═══ DRAINAGE SUMMARY ═══")
-            print(f"[EXPORT] Total drainage elements requested: {drainage_count}")
-            print(f"[EXPORT] Drainage elements created: {drainage_elements_created}")
-            print(f"[EXPORT] Drainage components created: {drainage_components_created}")
-            print(f"[EXPORT] ═══════════════════════════\n")
+            log(f"\n[EXPORT] ═══ DRAINAGE SUMMARY ═══")
+            log(f"[EXPORT] Total drainage elements requested: {drainage_count}")
+            log(f"[EXPORT] Drainage elements created: {drainage_elements_created}")
+            log(f"[EXPORT] Drainage components created: {drainage_components_created}")
+            log(f"[EXPORT] ═══════════════════════════\n")
 
         # Export retaining walls (concrete/RC, sheet pile, secant pile)
         retaining_walls_created = 0
         retaining_wall_components_created = 0
         if retaining_walls_data:
-            print(f"\n[EXPORT] ═══ RETAINING WALLS ═══")
-            print(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
+            log(f"\n[EXPORT] ═══ RETAINING WALLS ═══")
+            log(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
 
             for index, wall in enumerate(retaining_walls_data, start=1):
                 wall_name = wall.get("name", wall.get("wallId", "RetainingWall"))
@@ -6539,18 +6557,18 @@ def export_chambers_to_ifc(
                         f"Completed retaining wall {index}/{retaining_wall_count}",
                     )
 
-            print(f"\n[EXPORT] ═══ RETAINING WALL SUMMARY ═══")
-            print(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
-            print(f"[EXPORT] Retaining walls created: {retaining_walls_created}")
-            print(f"[EXPORT] Retaining wall components created: {retaining_wall_components_created}")
-            print(f"[EXPORT] ═══════════════════════════════\n")
+            log(f"\n[EXPORT] ═══ RETAINING WALL SUMMARY ═══")
+            log(f"[EXPORT] Total retaining walls requested: {retaining_wall_count}")
+            log(f"[EXPORT] Retaining walls created: {retaining_walls_created}")
+            log(f"[EXPORT] Retaining wall components created: {retaining_wall_components_created}")
+            log(f"[EXPORT] ═══════════════════════════════\n")
 
         # Export generic site mesh elements (buildings, ducts, cable trays, terrain)
         site_mesh_created = 0
         site_mesh_components_created = 0
         if site_mesh_elements_data:
-            print(f"\n[EXPORT] ═══ SITE MESH ELEMENTS ═══")
-            print(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
+            log(f"\n[EXPORT] ═══ SITE MESH ELEMENTS ═══")
+            log(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
 
             for index, element in enumerate(site_mesh_elements_data, start=1):
                 site_mesh_start_item = current_item
@@ -6586,19 +6604,19 @@ def export_chambers_to_ifc(
                         f"Completed site element {index}/{site_mesh_count}",
                     )
 
-            print(f"\n[EXPORT] ═══ SITE MESH SUMMARY ═══")
-            print(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
-            print(f"[EXPORT] Site mesh elements created: {site_mesh_created}")
-            print(f"[EXPORT] Site mesh components created: {site_mesh_components_created}")
-            print(f"[EXPORT] ═══════════════════════════\n")
+            log(f"\n[EXPORT] ═══ SITE MESH SUMMARY ═══")
+            log(f"[EXPORT] Total site mesh elements requested: {site_mesh_count}")
+            log(f"[EXPORT] Site mesh elements created: {site_mesh_created}")
+            log(f"[EXPORT] Site mesh components created: {site_mesh_components_created}")
+            log(f"[EXPORT] ═══════════════════════════\n")
 
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
-        print(f"[EXPORT] Writing IFC to {output_path}")
+        log(f"[EXPORT] Writing IFC to {output_path}")
         ifc_file.write(output_path)
         if progress_callback:
             progress_callback("complete", total_items, total_items, "Export complete!")
-        print("[EXPORT] ✅ Export complete!")
+        log("[EXPORT] ✅ Export complete!")
 
         return {
             "success": True,
@@ -6622,7 +6640,7 @@ def export_chambers_to_ifc(
         }
 
     except Exception as error:
-        print(f"[EXPORT] ❌ ERROR: {error}")
+        log(f"[EXPORT] ❌ ERROR: {error}")
         import traceback
 
         traceback.print_exc()
@@ -6644,9 +6662,9 @@ def create_blank_ifc_at_origin(output_path, project_name="InfraGrid3D Project"):
         dict: Result with success status and message
     """
     try:
-        print(f"[BLANK IFC] Creating blank IFC file at origin (0, 0, 0)")
-        print(f"[BLANK IFC] Project name: {project_name}")
-        print(f"[BLANK IFC] Output path: {output_path}")
+        log(f"[BLANK IFC] Creating blank IFC file at origin (0, 0, 0)")
+        log(f"[BLANK IFC] Project name: {project_name}")
+        log(f"[BLANK IFC] Output path: {output_path}")
         
         # Create project coordinates at origin
         project_coords = {
@@ -6666,9 +6684,9 @@ def create_blank_ifc_at_origin(output_path, project_name="InfraGrid3D Project"):
         # Write the IFC file
         ifc_file.write(output_path)
         
-        print(f"[BLANK IFC] ✅ Successfully created blank IFC file at origin")
-        print(f"[BLANK IFC]    Georeferencing: (0.0, 0.0, 0.0)")
-        print(f"[BLANK IFC]    File saved to: {output_path}")
+        log(f"[BLANK IFC] ✅ Successfully created blank IFC file at origin")
+        log(f"[BLANK IFC]    Georeferencing: (0.0, 0.0, 0.0)")
+        log(f"[BLANK IFC]    File saved to: {output_path}")
         
         return {
             "success": True,
@@ -6677,7 +6695,7 @@ def create_blank_ifc_at_origin(output_path, project_name="InfraGrid3D Project"):
         }
         
     except Exception as error:
-        print(f"[BLANK IFC] ❌ Error creating blank IFC: {error}")
+        log(f"[BLANK IFC] ❌ Error creating blank IFC: {error}")
         import traceback
         traceback.print_exc()
         return {
@@ -6688,7 +6706,7 @@ def create_blank_ifc_at_origin(output_path, project_name="InfraGrid3D Project"):
 def main():
     """Main entry point for CLI usage"""
     if len(sys.argv) < 2:
-        print("Usage: python export-ifc.py <input_json> [output_ifc]", file=sys.stderr)
+        log("Usage: python export-ifc.py <input_json> [output_ifc]", file=sys.stderr)
         sys.exit(1)
     
     input_file = sys.argv[1]
@@ -6705,7 +6723,7 @@ def main():
     result = export_chambers_to_ifc(chambers, output_file, project_coords)
     
     # Output result as JSON
-    print(json.dumps(result))
+    log(json.dumps(result))
     
     sys.exit(0 if result["success"] else 1)
 
