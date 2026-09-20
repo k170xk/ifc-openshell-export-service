@@ -31,7 +31,12 @@ ENV PORT=5001
 
 # Use gunicorn for production WSGI server
 # Gunicorn will automatically use the PORT environment variable.
-# gthread worker: the accept loop keeps heartbeating while a long export runs on a
-# thread, and --timeout matches Render's 100-minute edge limit so a large site is
-# never killed mid-write. /dev/shm keeps heartbeat files off the (slow) disk.
-CMD exec gunicorn --bind 0.0.0.0:${PORT:-5001} --worker-class gthread --workers 2 --threads 4 --timeout 6000 --graceful-timeout 60 --keep-alive 75 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - server:app
+# One gthread worker, many threads:
+# - export progress lives in an in-process dict, so the SSE stream must hit the
+#   same process as the POST; a second worker made progress a coin toss
+# - a second IfcOpenShell process costs ~150 MB of the 512 MB Starter box, which
+#   is what OOM-killed a 20k-element export
+# - the accept loop keeps heartbeating while an export runs on a thread, and
+#   --timeout matches Render's 100-minute edge limit so a large site is never
+#   killed mid-write. /dev/shm keeps heartbeat files off the (slow) disk.
+CMD exec gunicorn --bind 0.0.0.0:${PORT:-5001} --worker-class gthread --workers 1 --threads 8 --timeout 6000 --graceful-timeout 60 --keep-alive 75 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - server:app
