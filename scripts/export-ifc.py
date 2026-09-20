@@ -32,6 +32,118 @@ def log(*args, **kwargs):
         if any(marker in first for marker in _ALWAYS_LOG_MARKERS):
             print(*args, **kwargs)
 
+
+# Deferred spatial containment.
+#
+# ifcopenshell.api.spatial.assign_container rebuilds the container's single
+# IfcRelContainedInSpatialStructure.RelatedElements set on every call, so
+# calling it once per element is O(n^2): 5,000 road components spent 93% of the
+# export inside it. Elements are queued here and assigned in one call per
+# container by flush_container_assignments() right before the file is written.
+# Output is identical (same relationship, same relative placements).
+_pending_containment = {}
+
+
+def assign_to_container(ifc_file, products, relating_structure):
+    """Queue products for containment in relating_structure (flushed before write)."""
+    if not products:
+        return
+    per_file = _pending_containment.setdefault(id(ifc_file), {})
+    entry = per_file.get(relating_structure.id())
+    if entry is None:
+        entry = (relating_structure, [])
+        per_file[relating_structure.id()] = entry
+    entry[1].extend(products)
+
+
+def discard_container_assignments(ifc_file):
+    """Drop queued containment after a failed export so nothing leaks in a long-lived process."""
+    if ifc_file is not None:
+        _pending_containment.pop(id(ifc_file), None)
+
+
+def _placement_is_identity(structure):
+    """True when the container's absolute placement is the identity (or it has none)."""
+    placement = getattr(structure, "ObjectPlacement", None)
+    if placement is None:
+        return True
+    try:
+        import ifcopenshell.util.placement as ifc_placement
+
+        matrix = ifc_placement.get_local_placement(placement)
+        return bool(np.allclose(matrix, np.eye(4), atol=1e-9))
+    except Exception:
+        return False
+
+
+def _contain_directly(ifc_file, structure, products):
+    """Containment without the API's per-product placement rewrite.
+
+    spatial.assign_container re-bases every product placement onto the
+    container by removing and recreating ~5 entities per product; file.remove
+    is O(file size), so that is quadratic too (37 s of a 48 s export at 10k
+    elements). When the container placement is the identity the re-base is a
+    no-op, so write the relationship and point existing absolute placements at
+    the container placement — the same result the API produces.
+    """
+    products_set = set(products)
+    rel = next(iter(structure.ContainsElements), None)
+    if rel is not None:
+        existing = list(rel.RelatedElements)
+        seen = set(existing)
+        rel.RelatedElements = existing + [p for p in products if p not in seen]
+        ifc_run("owner.update_owner_history", file=ifc_file, element=rel)
+    else:
+        ordered = []
+        seen = set()
+        for p in products:
+            if p not in seen:
+                seen.add(p)
+                ordered.append(p)
+        ifc_file.create_entity(
+            "IfcRelContainedInSpatialStructure",
+            GlobalId=ifcopenshell.guid.new(),
+            OwnerHistory=ifc_run("owner.create_owner_history", file=ifc_file),
+            RelatedElements=ordered,
+            RelatingStructure=structure,
+        )
+    container_placement = getattr(structure, "ObjectPlacement", None)
+    if container_placement is not None:
+        for product in products_set:
+            placement = getattr(product, "ObjectPlacement", None)
+            if (
+                placement is not None
+                and placement.is_a("IfcLocalPlacement")
+                and placement.PlacementRelTo is None
+                and placement != container_placement
+            ):
+                placement.PlacementRelTo = container_placement
+
+
+def flush_container_assignments(ifc_file):
+    """Write one IfcRelContainedInSpatialStructure per container for queued products."""
+    per_file = _pending_containment.pop(id(ifc_file), None)
+    if not per_file:
+        return 0
+    assigned = 0
+    for structure, products in per_file.values():
+        # Anything already contained elsewhere needs the API's un-assign logic.
+        fresh = [p for p in products if not p.ContainedInStructure]
+        moved = [p for p in products if p.ContainedInStructure]
+        if fresh and _placement_is_identity(structure):
+            _contain_directly(ifc_file, structure, fresh)
+        elif fresh:
+            moved = fresh + moved
+        if moved:
+            ifc_run(
+                "spatial.assign_container",
+                file=ifc_file,
+                products=moved,
+                relating_structure=structure,
+            )
+        assigned += len(products)
+    return assigned
+
 # Bridge catalogue mesh types. Mirrors BRIDGE_MESH_TYPES in
 # src/app/tools/bridgeSpanGeometry.ts — every entry is exported as a
 # triangulated solid, so adding one there means adding it here too.
@@ -1299,12 +1411,7 @@ def add_chamber_to_ifc(
     # Assign to spatial container for IFC hierarchy compliance
     # This maintains the project→site→building→storey→chamber hierarchy
     # but placement remains absolute (not relative to storey)
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[chamber],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [chamber], storey)
     
     # ===== ADD MATERIAL =====
     chamber_material = chamber_data.get("material", "concrete")
@@ -1652,12 +1759,7 @@ def add_chamber_to_ifc(
             lid_element.Representation = lid_product_shape
             
             # Assign lid to spatial container
-            ifc_run(
-                "spatial.assign_container",
-                file=ifc_file,
-                products=[lid_element],
-                relating_structure=storey,
-            )
+            assign_to_container(ifc_file, [lid_element], storey)
             
             # ===== ADD LID MATERIAL =====
             lid_material_name = lid_config.get("material", "cast-iron")
@@ -2006,12 +2108,7 @@ def add_pipe_to_ifc(
     pipe.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[pipe],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [pipe], storey)
     
     # Apply color if provided
     if color_hex:
@@ -2205,12 +2302,7 @@ def add_road_to_ifc(
                         ifc_file.createIfcDirection((1.0, 0.0, 0.0)),
                     )
                 )
-                ifc_run(
-                    "spatial.assign_container",
-                    file=ifc_file,
-                    products=[proxy],
-                    relating_structure=storey,
-                )
+                assign_to_container(ifc_file, [proxy], storey)
                 add_custom_property_set(ifc_file, proxy, "Pset_InfraGridWideningGroup", {
                     "RoadId": road_id,
                     "GroupId": group_id,
@@ -2561,12 +2653,7 @@ def create_road_mesh_element(
     
     # Assign to spatial container
     try:
-        ifc_run(
-            "spatial.assign_container",
-            file=ifc_file,
-            products=[road_element],
-            relating_structure=storey,
-        )
+        assign_to_container(ifc_file, [road_element], storey)
         log(f"[ROAD]     ✅ Assigned to storey")
     except Exception as e:
         log(f"[ROAD]     ❌ ERROR assigning to storey: {e}")
@@ -2854,12 +2941,7 @@ def create_road_swept_element(
     element.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[element],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [element], storey)
     
     # Apply color
     if color_hex:
@@ -3036,12 +3118,7 @@ def add_cable_tray_to_ifc(
     log(f"[CABLE TRAY]   ✅ Geometry created")
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[tray],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [tray], storey)
     
     # Apply color
     if color_hex:
@@ -3253,12 +3330,7 @@ def add_hanger_to_ifc(
     log(f"[HANGER]   ✅ Geometry complete: top bar + 2 rods + bottom bar (all same thickness)")
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[hanger],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [hanger], storey)
     
     # Apply color
     if color_hex:
@@ -3351,12 +3423,7 @@ def add_dwg_line_to_ifc(ifc_file, storey, context, line_data, project_coords=Non
     line_element.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[line_element],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [line_element], storey)
     
     # Apply color if provided
     if color_hex:
@@ -3448,12 +3515,7 @@ def add_dwg_polyline_to_ifc(ifc_file, storey, context, polyline_data, project_co
     polyline_element.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[polyline_element],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [polyline_element], storey)
     
     # Apply color if provided
     if color_hex:
@@ -3549,12 +3611,7 @@ def add_connected_path_to_ifc(ifc_file, storey, context, path_data, project_coor
     path_element.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[path_element],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [path_element], storey)
     
     # Apply color if provided
     if color_hex:
@@ -3575,6 +3632,7 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
     Returns:
         Dictionary with success status and counts
     """
+    ifc_file = None
     try:
         path_count = len(connected_paths_data) if connected_paths_data else 0
         log(f"[DWG EXPORT] Starting export with {path_count} connected paths")
@@ -3589,6 +3647,7 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
                 add_connected_path_to_ifc(ifc_file, storey, context, path, project_coords)
         
         log(f"[DWG EXPORT] Writing IFC to {output_path}")
+        flush_container_assignments(ifc_file)
         ifc_file.write(output_path)
         log("[DWG EXPORT] ✅ Export complete!")
         
@@ -3599,6 +3658,7 @@ def export_dwg_lines_to_ifc(connected_paths_data, output_path, project_coords=No
         }
     
     except Exception as error:
+        discard_container_assignments(ifc_file)
         log(f"[DWG EXPORT] ❌ ERROR: {error}")
         import traceback
         traceback.print_exc()
@@ -4050,12 +4110,7 @@ def add_light_connection_to_ifc(
     conduit.Representation = product_shape
     
     # Assign to spatial container
-    ifc_run(
-        "spatial.assign_container",
-        file=ifc_file,
-        products=[conduit],
-        relating_structure=storey,
-    )
+    assign_to_container(ifc_file, [conduit], storey)
     
     # Apply color if provided
     if color_hex:
@@ -5127,12 +5182,7 @@ def add_public_light_to_ifc(
             sign_element.Representation = product_shape
             
             # Assign to spatial container
-            ifc_run(
-                "spatial.assign_container",
-                file=ifc_file,
-                products=[sign_element],
-                relating_structure=storey,
-            )
+            assign_to_container(ifc_file, [sign_element], storey)
             
             # Apply colors to individual components using styled items
             def apply_color_to_solids(solids_list, color_hex, component_name):
@@ -5690,12 +5740,7 @@ def add_public_light_to_ifc(
         light_element.Representation = product_shape
         
         # Assign to spatial container
-        ifc_run(
-            "spatial.assign_container",
-            file=ifc_file,
-            products=[light_element],
-            relating_structure=storey,
-        )
+        assign_to_container(ifc_file, [light_element], storey)
         
         # Apply colors to individual components using styled items
         # This allows different colors for pole, baseplate, foundation, and fixture
@@ -6173,6 +6218,7 @@ def export_chambers_to_ifc(
         roads_data: Optional list of road dictionaries with components
         hardstandings_data: Optional list of hardstanding area dictionaries with components
     """
+    ifc_file = None
     try:
         chamber_count = len(chambers_data)
         pipe_count = len(pipes_data) if pipes_data else 0
@@ -6613,6 +6659,7 @@ def export_chambers_to_ifc(
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
         log(f"[EXPORT] Writing IFC to {output_path}")
+        flush_container_assignments(ifc_file)
         ifc_file.write(output_path)
         if progress_callback:
             progress_callback("complete", total_items, total_items, "Export complete!")
@@ -6640,6 +6687,7 @@ def export_chambers_to_ifc(
         }
 
     except Exception as error:
+        discard_container_assignments(ifc_file)
         log(f"[EXPORT] ❌ ERROR: {error}")
         import traceback
 
@@ -6682,6 +6730,7 @@ def create_blank_ifc_at_origin(output_path, project_name="InfraGrid3D Project"):
         ifc_file, storey, body_context = create_ifc_file(project_name, project_coords)
         
         # Write the IFC file
+        flush_container_assignments(ifc_file)
         ifc_file.write(output_path)
         
         log(f"[BLANK IFC] ✅ Successfully created blank IFC file at origin")
