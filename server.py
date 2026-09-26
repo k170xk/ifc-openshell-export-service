@@ -345,10 +345,11 @@ def export_chambers():
         drainage_elements = data.get("drainageElements", [])
         retaining_walls = data.get("retainingWalls", [])
         site_mesh_elements = data.get("siteMeshElements", [])
+        watermain_fittings = data.get("watermainFittings", [])
         project = data.get("project", {})
         coordinate_mode = data.get("coordinateMode", "absolute")
         
-        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings) + len(drainage_elements) + len(retaining_walls) + len(site_mesh_elements)
+        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings) + len(drainage_elements) + len(retaining_walls) + len(site_mesh_elements) + len(watermain_fittings)
         
         # Initialize progress
         update_progress(export_id, {
@@ -361,7 +362,7 @@ def export_chambers():
         
         print("=" * 70)
         print(f"[API] Export request received (ID: {export_id})")
-        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings, {len(drainage_elements)} drainage elements, {len(retaining_walls)} retaining walls, {len(site_mesh_elements)} site mesh elements")
+        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings, {len(drainage_elements)} drainage elements, {len(retaining_walls)} retaining walls, {len(site_mesh_elements)} site mesh elements, {len(watermain_fittings)} watermain fittings")
         print("=" * 70)
         sys.stdout.flush()
         
@@ -407,6 +408,7 @@ def export_chambers():
             site_mesh_elements_data=site_mesh_elements,
             coordinate_mode=coordinate_mode,
             progress_callback=progress_callback,
+            watermain_fittings_data=watermain_fittings,
         )
         
         if not result.get("success"):

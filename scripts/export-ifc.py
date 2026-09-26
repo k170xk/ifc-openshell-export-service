@@ -316,6 +316,25 @@ def apply_color_to_element(ifc_file, element, color_hex):
     
     log(f"[COLOR] Applying color {color_hex} (RGB: {rgb}) to {element.Name}")
 
+    style_assignment = _style_assignment_for(ifc_file, color_hex, rgb)
+
+    # Create styled item for the element's representation
+    if hasattr(element, 'Representation') and element.Representation:
+        for representation in element.Representation.Representations:
+            for item in representation.Items:
+                ifc_file.createIfcStyledItem(
+                    item,  # Item
+                    [style_assignment],  # Styles
+                    None  # Name
+                )
+
+
+def _style_assignment_for(ifc_file, color_hex, rgb=None):
+    """Shared IfcPresentationStyleAssignment for a colour (cached per file)."""
+    rgb = rgb or hex_to_rgb(color_hex)
+    if not rgb:
+        return None
+
     # One IfcSurfaceStyle (+ colour, rendering, assignment) per distinct colour
     # per file. Large sites reuse a handful of colours across tens of thousands
     # of elements; recreating the four style entities per element was ~20% of
@@ -342,16 +361,7 @@ def apply_color_to_element(ifc_file, element, color_hex):
         )
         style_assignment = ifc_file.createIfcPresentationStyleAssignment([surface_style])
         _style_cache[cache_key] = style_assignment
-
-    # Create styled item for the element's representation
-    if hasattr(element, 'Representation') and element.Representation:
-        for representation in element.Representation.Representations:
-            for item in representation.Items:
-                ifc_file.createIfcStyledItem(
-                    item,  # Item
-                    [style_assignment],  # Styles
-                    None  # Name
-                )
+    return style_assignment
 
 
 def create_ifc_simple_value(ifc_file, value):
@@ -1990,6 +2000,7 @@ def add_pipe_to_ifc(
     points = pipe_data.get("points", None)  # Path points for multi-segment pipes
     color_hex = pipe_data.get("color", None)  # Hex color (e.g., "#FF0000")
     drainage_connection = pipe_data.get("drainageConnection")
+    watermain = pipe_data.get("watermain")  # Pressurised main barrel metadata
     
     log(f"\n[PIPE] Adding pipe: {pipe_id}")
     log(f"[PIPE]   Type: {'BEND' if is_bend else 'STRAIGHT'}")
@@ -2018,7 +2029,10 @@ def add_pipe_to_ifc(
     
     # Determine predefined type based on utility
     utility_lower = utility_type.lower()
-    if "sewer" in utility_lower or "drainage" in utility_lower or "waste" in utility_lower:
+    if watermain:
+        # PE mains are flexible segments; DI / steel / PVC are rigid.
+        predefined_type = "FLEXIBLESEGMENT" if watermain.get("flexible") else "RIGIDSEGMENT"
+    elif "sewer" in utility_lower or "drainage" in utility_lower or "waste" in utility_lower:
         predefined_type = "CULVERT"
     else:
         predefined_type = "RIGIDSEGMENT"
@@ -2166,10 +2180,289 @@ def add_pipe_to_ifc(
     # Apply color if provided
     if color_hex:
         apply_color_to_element(ifc_file, pipe, color_hex)
+
+    if watermain:
+        try:
+            add_watermain_barrel_psets(ifc_file, pipe, watermain, diameter, total_length)
+        except Exception as e:
+            log(f"[PIPE]   ⚠️ WARNING: Could not apply watermain properties: {e}")
     
     log(f"[PIPE]   ✅ Pipe created successfully")
     
     return pipe
+
+
+def add_watermain_barrel_psets(ifc_file, pipe, watermain, outer_diameter_m, total_length_m):
+    """Pset_PipeSegmentTypeCommon + Pset_InfraGridWatermain on a pressurised-main barrel."""
+    pressure_class = str(watermain.get("pressureClass") or "")
+    working_pressure_pa = None
+    if pressure_class.upper().startswith("PN"):
+        try:
+            working_pressure_pa = float(pressure_class[2:]) * 1.0e5  # bar -> Pa
+        except ValueError:
+            working_pressure_pa = None
+
+    dn_mm = watermain.get("dn")
+    reference = " ".join(
+        str(x) for x in (watermain.get("systemLabel"), f"DN{dn_mm}" if dn_mm else None, pressure_class or None) if x
+    )
+    add_custom_property_set(ifc_file, pipe, "Pset_PipeSegmentTypeCommon", {
+        "Reference": reference or None,
+        "Status": "NEW",
+        "NominalDiameter": float(dn_mm) / 1000.0 if dn_mm else None,
+        "OuterDiameter": float(outer_diameter_m),
+        "WorkingPressure": working_pressure_pa,
+    })
+    add_custom_property_set(ifc_file, pipe, "Pset_InfraGridWatermain", {
+        "System": watermain.get("systemLabel"),
+        "SystemCode": watermain.get("system"),
+        "Standard": watermain.get("standardRef"),
+        "NominalDiameter": dn_mm,
+        "PressureClass": pressure_class or None,
+        "WallClass": watermain.get("wallClass"),
+        "JointType": watermain.get("jointType"),
+        "PipeLength": watermain.get("pipeLengthM"),
+        "BarrelLength": watermain.get("barrelLengthM"),
+        "PipeCount": watermain.get("pipeCount"),
+        "RouteLength": round(float(total_length_m), 3),
+        "BendPolicy": watermain.get("bendPolicy"),
+        "Cover": watermain.get("coverMm"),
+        "RouteReference": watermain.get("routeReference"),
+    })
+    log(f"[PIPE]   ✅ Watermain psets applied ({reference})")
+
+
+WATERMAIN_FITTING_IFC_CLASSES = {
+    "IfcPipeFitting",
+    "IfcPipeSegment",
+    "IfcValve",
+    "IfcFireSuppressionTerminal",
+    "IfcFlowMeter",
+    "IfcFooting",
+    "IfcDistributionChamberElement",
+    "IfcDiscreteAccessory",
+    "IfcBuildingElementProxy",
+}
+
+
+def add_watermain_fitting_to_ifc(
+    ifc_file,
+    storey,
+    context,
+    fitting,
+    project_coords=None,
+    coordinate_mode="absolute",
+    origin_tuple=None,
+):
+    """Add one watermain fitting / appurtenance as a tessellated distribution element.
+
+    Each catalogue part (bend, tee, taper, valve, hydrant, air valve, dismantling
+    joint, thrust block, surface box, valve chamber…) arrives with its LOD 400
+    mesh split by colour. The element gets one Body/Tessellation representation
+    with a styled IfcTriangulatedFaceSet per colour, the resolver's IFC class and
+    predefined type, Pset_InfraGridWatermainFitting, and an IfcDistributionPort
+    at every joint face. Ports that share a face with another exported fitting are
+    linked with IfcRelConnectsPorts.
+
+    Returns (element, [(port, connected_fitting_id), …]) or (None, []).
+    """
+    fitting_id = fitting.get("fittingId", "WatermainFitting")
+    kind = fitting.get("kind", "fitting")
+    description = fitting.get("description") or kind
+    ifc_class = fitting.get("ifcClass") or "IfcPipeFitting"
+    if ifc_class not in WATERMAIN_FITTING_IFC_CLASSES:
+        log(f"[WATERMAIN]   ⚠️ Unknown IFC class {ifc_class} for {kind}; using IfcPipeFitting")
+        ifc_class = "IfcPipeFitting"
+    predefined_type = fitting.get("predefinedType") or "NOTDEFINED"
+    components = fitting.get("components", [])
+    ports_data = fitting.get("ports", [])
+
+    log(f"\n[WATERMAIN] Adding fitting: {fitting_id} ({kind}) -> {ifc_class}.{predefined_type}")
+    log(f"[WATERMAIN]   {description}; {len(components)} mesh part(s), {len(ports_data)} port(s)")
+
+    origin_tuple = origin_tuple or get_project_origin_tuple(project_coords)
+
+    items = []
+    styled = []
+    for component in components:
+        vertices = component.get("vertices", [])
+        indices = component.get("indices", [])
+        if len(vertices) < 3 or len(indices) < 3:
+            continue
+        ifc_vertices = []
+        for v in vertices:
+            local_x, local_y, local_z = convert_world_to_mode(
+                float(v[0]), float(v[1]), float(v[2]), origin_tuple, coordinate_mode
+            )
+            ifc_vertices.append((local_x, local_z, local_y))  # Y-up -> Z-up
+        coord_list = ifc_file.createIfcCartesianPointList3D(ifc_vertices)
+        triangles = [
+            (indices[i] + 1, indices[i + 1] + 1, indices[i + 2] + 1)
+            for i in range(0, len(indices) - 2, 3)
+        ]
+        face_set = ifc_file.createIfcTriangulatedFaceSet(coord_list, None, True, triangles, None)
+        items.append(face_set)
+        styled.append((face_set, component.get("color"), component.get("partName")))
+
+    if not items:
+        log(f"[WATERMAIN]   ⚠️ Skipping {fitting_id}: no geometry")
+        return None, []
+
+    shape_rep = ifc_file.createIfcShapeRepresentation(context, "Body", "Tessellation", items)
+    product_shape = ifc_file.createIfcProductDefinitionShape(None, None, [shape_rep])
+
+    try:
+        element = ifc_run(
+            "root.create_entity",
+            file=ifc_file,
+            ifc_class=ifc_class,
+            name=fitting_id,
+            predefined_type=predefined_type,
+        )
+    except Exception as e:
+        log(f"[WATERMAIN]   ⚠️ {ifc_class}.{predefined_type} rejected ({e}); retrying as IfcPipeFitting.USERDEFINED")
+        ifc_class, predefined_type = "IfcPipeFitting", "USERDEFINED"
+        element = ifc_run(
+            "root.create_entity",
+            file=ifc_file,
+            ifc_class=ifc_class,
+            name=fitting_id,
+            predefined_type=predefined_type,
+        )
+    if predefined_type == "USERDEFINED" and not getattr(element, "ObjectType", None):
+        element.ObjectType = kind
+    if hasattr(element, "Description"):
+        element.Description = description[:255]
+    if hasattr(element, "Tag"):
+        element.Tag = str(fitting.get("standardRef") or kind)[:255]
+
+    element.ObjectPlacement = _origin_placement(ifc_file)
+    element.Representation = product_shape
+    assign_to_container(ifc_file, [element], storey)
+
+    for face_set, color_hex, part_name in styled:
+        item_name = part_name if isinstance(part_name, str) and part_name else None
+        if not color_hex:
+            continue
+        try:
+            style_assignment = _style_assignment_for(ifc_file, color_hex)
+            if style_assignment is not None:
+                ifc_file.createIfcStyledItem(face_set, [style_assignment], item_name)
+        except Exception as e:
+            log(f"[WATERMAIN]   ⚠️ WARNING: Could not style part: {e}")
+
+    # Property set — flattened resolver properties, PascalCase keys.
+    try:
+        pset_values = {
+            "FittingId": fitting_id,
+            "PolylineId": fitting.get("polylineId"),
+            "IfcClass": ifc_class,
+            "PredefinedType": predefined_type,
+        }
+        for key, value in (fitting.get("properties") or {}).items():
+            if value is None:
+                continue
+            pset_values[str(key)[:1].upper() + str(key)[1:]] = value
+        add_custom_property_set(ifc_file, element, "Pset_InfraGridWatermainFitting", pset_values)
+        if kind in ("gate-valve", "butterfly-valve", "prv", "air-valve-single", "air-valve-double", "washout"):
+            add_custom_property_set(ifc_file, element, "Pset_ValveTypeCommon", {
+                "Reference": fitting.get("standardRef") or description,
+                "Status": "NEW",
+                "Size": float(fitting.get("dn") or 0) / 1000.0 or None,
+                "WorkingPressure": _pressure_class_pa(fitting),
+            })
+        elif ifc_class == "IfcPipeFitting":
+            add_custom_property_set(ifc_file, element, "Pset_PipeFittingTypeCommon", {
+                "Reference": fitting.get("standardRef") or description,
+                "Status": "NEW",
+                "PressureClass": (fitting.get("properties") or {}).get("PressureClass"),
+                "PressureRange": _pressure_class_pa(fitting),
+            })
+    except Exception as e:
+        log(f"[WATERMAIN]   ⚠️ WARNING: Could not apply fitting properties: {e}")
+
+    # Distribution ports at every joint face.
+    ports = []
+    for idx, port_data in enumerate(ports_data):
+        try:
+            position = port_data.get("position") or [0, 0, 0]
+            direction = port_data.get("direction") or [1, 0, 0]
+            px, py, pz = convert_world_to_mode(
+                float(position[0]), float(position[1]), float(position[2]), origin_tuple, coordinate_mode
+            )
+            dx, dy, dz = float(direction[0]), float(direction[1]), float(direction[2])
+            axis = ifc_file.createIfcDirection((dx, dz, dy))  # Y-up -> Z-up
+            ref_dir = ifc_file.createIfcDirection((0.0, 0.0, 1.0)) if abs(dy) < 0.9 else ifc_file.createIfcDirection((1.0, 0.0, 0.0))
+            placement = ifc_file.createIfcLocalPlacement(
+                None,
+                ifc_file.createIfcAxis2Placement3D(
+                    ifc_file.createIfcCartesianPoint((px, pz, py)),
+                    axis,
+                    ref_dir,
+                ),
+            )
+            port = ifc_file.createIfcDistributionPort(
+                ifcopenshell.guid.new(),
+                None,
+                f"{fitting_id}_port{idx + 1}",
+                str(port_data.get("kind") or "joint"),
+                None,
+                placement,
+                None,
+                "SOURCEANDSINK",  # FlowDirection
+                "PIPE",           # PredefinedType (IfcDistributionPortTypeEnum)
+                "WATERSUPPLY",    # SystemType (IfcDistributionSystemEnum)
+            )
+            ifc_file.createIfcRelNests(
+                ifcopenshell.guid.new(), None, None, None, element, [port]
+            )
+            ports.append((port, port_data.get("connectedTo")))
+        except Exception as e:
+            log(f"[WATERMAIN]   ⚠️ WARNING: Could not create port {idx + 1}: {e}")
+
+    log(f"[WATERMAIN]   ✅ Created {ifc_class} with {len(items)} part(s), {len(ports)} port(s)")
+    return element, ports
+
+
+def _pressure_class_pa(fitting):
+    pc = str((fitting.get("properties") or {}).get("PressureClass") or "")
+    if pc.upper().startswith("PN"):
+        try:
+            return float(pc[2:]) * 1.0e5
+        except ValueError:
+            return None
+    return None
+
+
+def connect_watermain_ports(ifc_file, port_registry):
+    """IfcRelConnectsPorts between fittings that share a joint face.
+
+    `port_registry` maps fitting id -> list of (port, connected_fitting_id). Two
+    ports are linked once when each names the other's fitting.
+    """
+    linked = set()
+    created = 0
+    for fitting_id, ports in port_registry.items():
+        for port, other_id in ports:
+            if not other_id or other_id not in port_registry:
+                continue
+            key = tuple(sorted((fitting_id, other_id)))
+            if key in linked:
+                continue
+            match = next(
+                (p for p, back in port_registry[other_id] if back == fitting_id),
+                None,
+            )
+            if match is None:
+                continue
+            ifc_file.createIfcRelConnectsPorts(
+                ifcopenshell.guid.new(), None, None, None, port, match, None
+            )
+            linked.add(key)
+            created += 1
+    if created:
+        log(f"[WATERMAIN] ✅ Connected {created} port pair(s)")
+    return created
 
 
 def add_road_to_ifc(
@@ -2620,6 +2913,12 @@ def create_road_mesh_element(
     elif comp_type in ("building-walls", "building-roof", "building"):
         ifc_class = "IfcBuildingElementProxy"
         predefined_type = "NOTDEFINED"
+    elif comp_type in ("roadside-access-path", "roadside-driveway", "roadside-garden"):
+        ifc_class = "IfcSlab"
+        predefined_type = "PAVING"
+    elif comp_type == "roadside-garden-fence":
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
     elif comp_type in ("parking-marking", "parking-island"):
         # Parking V2: painted bay markings and planted/paved islands ride as
         # paving slabs so every viewer shows them alongside the hardstanding.
@@ -2637,9 +2936,20 @@ def create_road_mesh_element(
     elif comp_type in ("parking-wheel-stop", "parking-bollard", "parking-sign", "parking-furniture"):
         ifc_class = "IfcBuildingElementProxy"
         predefined_type = "NOTDEFINED"
-    elif comp_type == "parking-tree":
+    elif comp_type in ("parking-tree", "scene-prop-tree"):
         ifc_class = "IfcGeographicElement"
         predefined_type = "USERDEFINED"
+    elif comp_type in (
+        "scene-prop-furniture",
+        "scene-prop-vehicle",
+        "scene-prop-person",
+        "scene-prop-plant",
+        "scene-prop-structure",
+        "scene-prop",
+    ):
+        # Props-ribbon furniture, vehicles, people and structures.
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "NOTDEFINED"
     elif comp_type in ("electrical-utility-body", "electrical-utility"):
         # Manufacturer IFC/FBX/GLB electrical utilities (EV chargers, CCTV, etc.)
         ifc_class = "IfcBuildingElementProxy"
@@ -6230,6 +6540,7 @@ def export_chambers_to_ifc(
     site_mesh_elements_data=None,
     coordinate_mode="absolute",
     progress_callback=None,
+    watermain_fittings_data=None,
 ):
     """
     Export chambers, pipes, roads, hardstandings, public lights, and light connections to IFC file
@@ -6257,9 +6568,10 @@ def export_chambers_to_ifc(
         drainage_count = len(drainage_elements_data) if drainage_elements_data else 0
         retaining_wall_count = len(retaining_walls_data) if retaining_walls_data else 0
         site_mesh_count = len(site_mesh_elements_data) if site_mesh_elements_data else 0
-        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count + retaining_wall_count + site_mesh_count
+        watermain_fitting_count = len(watermain_fittings_data) if watermain_fittings_data else 0
+        total_items = chamber_count + pipe_count + tray_count + hanger_count + public_light_count + light_connection_count + road_count + hardstanding_count + drainage_count + retaining_wall_count + site_mesh_count + watermain_fitting_count
         log(
-            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, {drainage_count} drainage elements, {retaining_wall_count} retaining walls, and {site_mesh_count} site mesh elements"
+            f"[EXPORT] Starting export with {chamber_count} chambers, {pipe_count} pipes, {tray_count} cable trays, {hanger_count} hangers, {public_light_count} public lights, {light_connection_count} light connections, {road_count} roads, {hardstanding_count} hardstandings, {drainage_count} drainage elements, {retaining_wall_count} retaining walls, {site_mesh_count} site mesh elements, and {watermain_fitting_count} watermain fittings"
         )
 
         coordinate_mode = (coordinate_mode or "absolute").lower()
@@ -6682,6 +6994,50 @@ def export_chambers_to_ifc(
             log(f"[EXPORT] Site mesh components created: {site_mesh_components_created}")
             log(f"[EXPORT] ═══════════════════════════\n")
 
+        # Export watermain fittings (LOD 400 pressurised-main assemblies) + ports
+        watermain_fittings_created = 0
+        watermain_ports_connected = 0
+        if watermain_fittings_data:
+            log(f"\n[EXPORT] ═══ WATERMAIN FITTINGS ═══")
+            log(f"[EXPORT] Total watermain fittings requested: {watermain_fitting_count}")
+            port_registry = {}
+            for index, fitting in enumerate(watermain_fittings_data, start=1):
+                try:
+                    element, ports = add_watermain_fitting_to_ifc(
+                        ifc_file,
+                        storey,
+                        context,
+                        fitting,
+                        project_coords,
+                        coordinate_mode=coordinate_mode,
+                        origin_tuple=origin_tuple,
+                    )
+                except Exception as e:
+                    log(f"[EXPORT] ❌ Watermain fitting {index} failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    element, ports = None, []
+                if element is not None:
+                    watermain_fittings_created += 1
+                    port_registry[fitting.get("fittingId", f"fitting_{index}")] = ports
+                current_item += 1
+                if progress_callback and (index % 10 == 0 or index == watermain_fitting_count):
+                    progress_callback(
+                        "watermain",
+                        current_item,
+                        total_items,
+                        f"Watermain fitting {index}/{watermain_fitting_count}",
+                    )
+            try:
+                watermain_ports_connected = connect_watermain_ports(ifc_file, port_registry)
+            except Exception as e:
+                log(f"[EXPORT] ⚠️ Could not connect watermain ports: {e}")
+
+            log(f"\n[EXPORT] ═══ WATERMAIN SUMMARY ═══")
+            log(f"[EXPORT] Watermain fittings created: {watermain_fittings_created}")
+            log(f"[EXPORT] Port pairs connected: {watermain_ports_connected}")
+            log(f"[EXPORT] ═══════════════════════════\n")
+
         if progress_callback:
             progress_callback("writing", current_item, total_items, "Writing IFC file...")
         log(f"[EXPORT] Writing IFC to {output_path}")
@@ -6710,6 +7066,9 @@ def export_chambers_to_ifc(
             "retaining_wall_components_count": retaining_wall_components_created,
             "site_mesh_elements_count": site_mesh_count,
             "site_mesh_components_count": site_mesh_components_created,
+            "watermain_fittings_count": watermain_fitting_count,
+            "watermain_fittings_created": watermain_fittings_created,
+            "watermain_ports_connected": watermain_ports_connected,
         }
 
     except Exception as error:
