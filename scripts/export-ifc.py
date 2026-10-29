@@ -750,45 +750,54 @@ def create_chamber_geometry_solids(
         # The opening should match the lid frame OUTER dimensions exactly
         # Lid frame outer radius = lid_radius + frame_thickness (for circular)
         # Lid frame outer size = lid_size + frame_thickness (for rectangular)
+        # Every chamber/lid shape combination reads all three, so seed them all.
+        slab_half_min = radius if radius else min(width, length) / 2.0
+        opening_radius = slab_half_min * 0.5
+        opening_width = (radius * 2.0 if radius else width) * 0.5
+        opening_length = (radius * 2.0 if radius else length) * 0.5
+
         if lid_config:
-            lid_shape = lid_config.get("shape", shape)
-            lid_frame_thickness = lid_config.get("frameThickness", 75) / 1000  # mm to m
-            
-            if lid_shape == "circle":
-                # Match lid frame outer radius exactly
+            lid_shape = lid_config.get("shape") or shape
+            lid_frame_thickness = (lid_config.get("frameThickness") or 75) / 1000  # mm to m
+            use_circular_opening = lid_shape == "circle"
+
+            if use_circular_opening:
                 # Lid frame: outer_radius = lid_radius + frame_thickness
                 lid_diameter = lid_config.get("diameter")
                 if lid_diameter:
-                    lid_radius_m = (lid_diameter / 1000) / 2
-                    # Frame outer radius = lid_radius + frame_thickness
-                    opening_radius = lid_radius_m + lid_frame_thickness
-                else:
-                    opening_radius = radius * 0.5 if radius else min(width, length) * 0.25
-                log(f"[CHAMBER]   Lid frame outer radius: {opening_radius}m (lid_r={lid_radius_m if lid_diameter else 'N/A'}m, frame={lid_frame_thickness}m)")
+                    opening_radius = (lid_diameter / 1000) / 2 + lid_frame_thickness
+                log(f"[CHAMBER]   Lid frame outer radius: {opening_radius}m (lid_d={lid_diameter or 'N/A'}mm, frame={lid_frame_thickness}m)")
             else:
-                # Rectangular lid opening
                 # Lid frame: outer_size = lid_size + frame_thickness
                 lid_width_cfg = lid_config.get("width")
                 lid_length_cfg = lid_config.get("length")
                 if lid_width_cfg:
                     opening_width = lid_width_cfg / 1000 + lid_frame_thickness
-                else:
-                    opening_width = width * 0.5
                 if lid_length_cfg:
                     opening_length = lid_length_cfg / 1000 + lid_frame_thickness
-                else:
-                    opening_length = length * 0.5
                 log(f"[CHAMBER]   Lid frame outer size: {opening_width}m x {opening_length}m")
         else:
             # No lid config - use inner wall dimensions or 50% of outer
-            if shape == "circle" and radius:
-                opening_radius = inner_radius if inner_radius and inner_radius > 0 else radius * 0.5
-            else:
-                opening_width = width - wall_thickness * 2 if wall_thickness > 0 else width * 0.5
-                opening_length = length - wall_thickness * 2 if wall_thickness > 0 else length * 0.5
-        
-        # Determine if opening should be circular or rectangular
-        use_circular_opening = (lid_config and lid_config.get("shape") == "circle") or (shape == "circle" and not lid_config)
+            use_circular_opening = bool(shape == "circle" and radius)
+            if use_circular_opening:
+                if inner_radius and inner_radius > 0:
+                    opening_radius = inner_radius
+            elif wall_thickness > 0:
+                opening_width = max(width - wall_thickness * 2, width * 0.1)
+                opening_length = max(length - wall_thickness * 2, length * 0.1)
+
+        # The opening must stay inside the slab or the profile self-intersects.
+        if radius:
+            opening_radius = min(opening_radius, radius * 0.95)
+            half_diag = math.hypot(opening_width / 2, opening_length / 2)
+            if half_diag > radius * 0.95:
+                scale = radius * 0.95 / half_diag
+                opening_width *= scale
+                opening_length *= scale
+        else:
+            opening_radius = min(opening_radius, min(width, length) / 2 * 0.95)
+            opening_width = min(opening_width, width * 0.95)
+            opening_length = min(opening_length, length * 0.95)
         
         if shape == "circle" and radius:
             # Circular top slab
@@ -803,7 +812,7 @@ def create_chamber_geometry_solids(
             outer_polyline = ifc_file.createIfcPolyline(outer_points)
             
             # Inner opening (clockwise) - use lid-based opening_radius
-            if not lid_config or lid_config.get("shape") == "circle":
+            if use_circular_opening:
                 inner_points = []
                 for i in range(NUM_SEGMENTS):
                     angle = 2 * math.pi * (NUM_SEGMENTS - i) / NUM_SEGMENTS
@@ -828,7 +837,10 @@ def create_chamber_geometry_solids(
             top_profile = ifc_file.createIfcArbitraryProfileDefWithVoids(
                 "AREA", None, outer_polyline, [inner_polyline]
             )
-            log(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
+            if use_circular_opening:
+                log(f"[CHAMBER]   Top slab opening: circular radius={opening_radius}m")
+            else:
+                log(f"[CHAMBER]   Top slab opening: rectangular {opening_width}m x {opening_length}m")
         else:
             # Rectangular top slab
             # Outer boundary
@@ -844,7 +856,7 @@ def create_chamber_geometry_solids(
             outer_polyline = ifc_file.createIfcPolyline(outer_points)
             
             # Inner opening (clockwise)
-            if lid_config and lid_config.get("shape") == "circle":
+            if use_circular_opening:
                 # Circular opening in rectangular slab
                 inner_points = []
                 for i in range(NUM_SEGMENTS):
@@ -2950,6 +2962,42 @@ def create_road_mesh_element(
         # Props-ribbon furniture, vehicles, people and structures.
         ifc_class = "IfcBuildingElementProxy"
         predefined_type = "NOTDEFINED"
+    elif comp_type in (
+        "attenuation-tank",
+        "attenuation-structure",
+        "attenuation-grate",
+        "attenuation-cover",
+    ):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
+    elif comp_type == "gulley-pot":
+        ifc_class = "IfcFlowTerminal"
+        predefined_type = "USERDEFINED"
+    elif comp_type in (
+        "headwall",
+        "head-wall",
+        "wing-left",
+        "wing-right",
+        "coping",
+        "base-slab",
+        "cutoff-wall",
+        "grille",
+        "handrail",
+    ):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("drainage-unit", "drainage-unit-body"):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("signal-head", "signal-board", "signal-aspect"):
+        ifc_class = "IfcLightFixture"
+        predefined_type = "USERDEFINED"
+    elif comp_type in ("traffic-signal", "traffic-signal-column"):
+        ifc_class = "IfcColumn"
+        predefined_type = "COLUMN"
+    elif comp_type.startswith("traffic-signal"):
+        ifc_class = "IfcBuildingElementProxy"
+        predefined_type = "USERDEFINED"
     elif comp_type in ("electrical-utility-body", "electrical-utility"):
         # Manufacturer IFC/FBX/GLB electrical utilities (EV chargers, CCTV, etc.)
         ifc_class = "IfcBuildingElementProxy"
@@ -6445,6 +6493,11 @@ def add_site_mesh_element_to_ifc(
       chamber-level-sticker -> IfcBuildingElementProxy (embossed IL/CL level labels)
       electrical-utility -> IfcBuildingElementProxy (manufacturer IFC/FBX body)
                            + IfcPipeSegment (conduit spur)
+      attenuation-tank   -> IfcBuildingElementProxy (tank structure / grate / cover)
+      gulley-pot         -> IfcBuildingElementProxy (standalone pot body)
+      headwall           -> IfcBuildingElementProxy (head wall, wings, apron)
+      drainage-unit      -> IfcBuildingElementProxy (manufacturer body on a chamber)
+      traffic-signal     -> IfcColumn / IfcLightFixture / proxy (pole, heads, aspects)
       parking-lot        -> IfcSlab PAVING (markings, islands, kerbs)
                            + IfcLightFixture / IfcElectricDistributionBoard /
                              IfcBuildingElementProxy furniture, IfcGeographicElement trees
