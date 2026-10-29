@@ -1044,6 +1044,28 @@ def create_circular_hollow_polygon_profile(ifc_file, outer_radius, inner_radius,
     return profile
 
 
+def lid_dimension_m(lid_config, key, default_mm):
+    value = (lid_config or {}).get(key)
+    if value is None:
+        value = default_mm
+    return max(float(value), 0.0) / 1000.0
+
+
+def lid_assembly_height_m(lid_config, chamber_shape="circle"):
+    """
+    How far the lid assembly reaches below the cover level, matching the app's
+    getLidAssemblyHeightMeters. Cover level is the top of the lid plate; walls
+    and roof slab stop this far below it.
+    """
+    if not lid_config:
+        return 0.0
+    frame = lid_dimension_m(lid_config, "frameThickness", 75)
+    lid = lid_dimension_m(lid_config, "thickness", 50)
+    if (lid_config.get("shape") or chamber_shape) == "circle":
+        return max(frame / 2.0, lid)
+    return frame / 2.0 + lid
+
+
 def create_lid_representation(
     ifc_file,
     context,
@@ -1053,13 +1075,14 @@ def create_lid_representation(
     chamber_length,
     chamber_diameter,
 ):
-    """Create lid geometry for a chamber - MATCHING Three.js model exactly.
-    
-    Three.js Model Structure:
-    - Circular Frame: Torus with frameRadius = lidRadius + frameThickness/2, tube radius = frameThickness/2
-    - Circular Lid: Cylinder with lidRadius, centered at frameThickness/2 height (sits inside frame)
-    - Rectangular Frame: Solid box (lidWidth + frameThickness) x frameThickness x (lidLength + frameThickness)
-    - Rectangular Lid: Solid box lidWidth x lidThickness x lidLength, on top of frame
+    """Create lid geometry for a chamber, matching the app's addLidGeometry.
+
+    Local Z=0 is the cover level (top of the lid plate); everything sits below it.
+    - Circular frame: ring lidRadius..lidRadius+frameThickness, Z=-frameThickness..0
+    - Circular lid: disc lidRadius, Z=-lidThickness..0
+    - Rectangular frame: (lidWidth+frameThickness) x (lidLength+frameThickness),
+      Z=-(lidThickness+frameThickness)..-lidThickness, under the plate
+    - Rectangular lid: lidWidth x lidLength, Z=-lidThickness..0
     
     Args:
         ifc_file: IFC file object
@@ -1077,9 +1100,9 @@ def create_lid_representation(
         return []
     
     # Get lid dimensions (convert mm to meters)
-    lid_shape = lid_config.get("shape", chamber_shape)
-    lid_thickness = lid_config.get("thickness", 50) / 1000  # Default 50mm
-    frame_thickness = lid_config.get("frameThickness", 75) / 1000  # Default 75mm
+    lid_shape = lid_config.get("shape") or chamber_shape
+    lid_thickness = lid_dimension_m(lid_config, "thickness", 50)
+    frame_thickness = lid_dimension_m(lid_config, "frameThickness", 75)
     
     # Vent hole configuration
     has_vent_holes = lid_config.get("hasVentHoles", False)
@@ -1146,10 +1169,9 @@ def create_lid_representation(
             ifc_file, frame_outer_radius, frame_inner_radius, NUM_SEGMENTS
         )
         
-        # Frame extrusion - height matches the tube diameter (frame_thickness)
-        # Centered vertically at Z=0 to Z=frame_thickness
+        # The ring finishes flush with the plate top, as the app's torus does.
         frame_extrusion = ifc_file.createIfcAxis2Placement3D(
-            ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            ifc_file.createIfcCartesianPoint((0.0, 0.0, -frame_thickness)),
             ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
             ifc_file.createIfcDirection((1.0, 0.0, 0.0))
         )
@@ -1208,16 +1230,8 @@ def create_lid_representation(
             # Solid lid (high detail circle)
             lid_profile = create_circular_polygon_profile(ifc_file, lid_radius, NUM_SEGMENTS)
         
-        # Lid position: sits on top of frame center (matching Three.js)
-        # Three.js: frame (torus) center at height, lid at height + lidThickness/2
-        # The torus extends from height - frameThickness/2 to height + frameThickness/2
-        # Lid bottom is at height (frame center), lid top at height + lidThickness
-        # For IFC: frame extrusion is from 0 to frameThickness, so frame center is at frameThickness/2
-        # Lid should start at frameThickness/2 (frame center level)
-        lid_z_offset = frame_thickness / 2
-        
         lid_extrusion = ifc_file.createIfcAxis2Placement3D(
-            ifc_file.createIfcCartesianPoint((0.0, 0.0, lid_z_offset)),
+            ifc_file.createIfcCartesianPoint((0.0, 0.0, -lid_thickness)),
             ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
             ifc_file.createIfcDirection((1.0, 0.0, 0.0))
         )
@@ -1243,9 +1257,9 @@ def create_lid_representation(
             "AREA", None, axis_placement, frame_width, frame_length
         )
         
-        # Frame extrusion
+        # The frame sits directly under the plate.
         frame_extrusion = ifc_file.createIfcAxis2Placement3D(
-            ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            ifc_file.createIfcCartesianPoint((0.0, 0.0, -(lid_thickness + frame_thickness))),
             ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
             ifc_file.createIfcDirection((1.0, 0.0, 0.0))
         )
@@ -1258,9 +1272,7 @@ def create_lid_representation(
         )
         solids.append(frame_solid)
         
-        # ===== RECTANGULAR LID - On top of frame =====
-        # Three.js: lid.position.y = height + frameThickness/2 + lidThickness/2
-        # So lid sits ON TOP of the frame
+        # ===== RECTANGULAR LID - plate top at cover level =====
         
         # Lid with optional vent holes
         if has_vent_holes and vent_hole_count > 0:
@@ -1308,9 +1320,8 @@ def create_lid_representation(
                 "AREA", None, axis_placement, lid_width, lid_length
             )
         
-        # Lid extrusion placement (on top of frame)
         lid_extrusion = ifc_file.createIfcAxis2Placement3D(
-            ifc_file.createIfcCartesianPoint((0.0, 0.0, frame_thickness)),
+            ifc_file.createIfcCartesianPoint((0.0, 0.0, -lid_thickness)),
             ifc_file.createIfcDirection((0.0, 0.0, 1.0)),
             ifc_file.createIfcDirection((1.0, 0.0, 0.0))
         )
@@ -1475,13 +1486,15 @@ def add_chamber_to_ifc(
 
     # Get lid config for sizing top slab opening
     lid_config = chamber_data.get("lidConfig")
+    # Walls and roof slab stop under the lid assembly, as the app draws them.
+    structure_height = max(chamber_height - lid_assembly_height_m(lid_config, shape), 0.01)
     
     representation = create_chamber_representation(
         ifc_file,
         context,
         width,
         length,
-        chamber_height,
+        structure_height,
         base_thickness,
         top_thickness,
         shape,
@@ -1794,20 +1807,8 @@ def add_chamber_to_ifc(
         )
         
         if lid_solids:
-            # Position lid to match Three.js model
-            # Three.js: frame (torus) CENTER is at cover level (height)
-            # Frame extends from cover - frameThickness/2 to cover + frameThickness/2
-            # Lid bottom is at cover level
-            # 
-            # IFC geometry (local coords):
-            # - Frame: Z=0 to Z=frameThickness
-            # - Lid: Z=frameThickness/2 to Z=frameThickness/2 + lidThickness
-            #
-            # So lid element should be placed at cover - frameThickness/2
-            # This way frame center (Z=frameThickness/2) aligns with cover level
-            
-            lid_frame_thickness = lid_config.get("frameThickness", 75) / 1000  # mm to m
-            lid_placement_z = cover_elevation - lid_frame_thickness / 2
+            # Lid solids are built down from local Z=0, so Z=0 is the cover level.
+            lid_placement_z = cover_elevation
             
             lid_matrix = np.eye(4)
             cos_a = math.cos(rotation_radians)
@@ -1819,13 +1820,11 @@ def add_chamber_to_ifc(
             lid_matrix[1, 0] = sin_a
             lid_matrix[1, 1] = cos_a
             
-            # Translation - lid element placed so frame center aligns with cover level
             lid_matrix[0, 3] = local_x
             lid_matrix[1, 3] = local_z
             lid_matrix[2, 3] = lid_placement_z
             
-            log(f"[LID]   Frame thickness: {lid_frame_thickness}m")
-            log(f"[LID]   Position: X={local_x}, Y={local_z}, Z={lid_placement_z} (cover={cover_elevation}, offset={-lid_frame_thickness/2})")
+            log(f"[LID]   Position: X={local_x}, Y={local_z}, Z={lid_placement_z} (cover level, top of lid plate)")
             
             # Set lid placement
             lid_placement = ifc_run(
