@@ -15,6 +15,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
 # Import using importlib since the filename has a hyphen
 import importlib.util
+import multiprocessing
+import shutil
 spec = importlib.util.spec_from_file_location("export_ifc", os.path.join(os.path.dirname(__file__), 'scripts', 'export-ifc.py'))
 export_ifc_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(export_ifc_module)
@@ -22,9 +24,10 @@ export_dwg_lines_to_ifc = export_ifc_module.export_dwg_lines_to_ifc
 create_blank_ifc_at_origin = export_ifc_module.create_blank_ifc_at_origin
 export_chambers_to_ifc = export_ifc_module.export_chambers_to_ifc
 add_light_connection_to_ifc = export_ifc_module.add_light_connection_to_ifc
+import export_worker
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, expose_headers=["X-Export-Id", "X-Export-Skipped-Count", "X-Export-Skipped", "X-Export-Timing"])
 # Large sites (tens of km of roads) post hundreds of MB of JSON, gzip'd to a fraction. No Flask cap.
 app.config["MAX_CONTENT_LENGTH"] = None
 
@@ -33,6 +36,28 @@ export_progress = {}
 export_lock = threading.Lock()
 
 GZIP_MAGIC = b"\x1f\x8b"
+
+# One IFC build peaks near 1 GB on a large site; two at once on the 2 GB box is
+# an OOM kill for both. Later requests wait their turn instead.
+EXPORT_CONCURRENCY = max(1, int(os.environ.get("EXPORT_CONCURRENCY", "1")))
+export_slots = threading.BoundedSemaphore(EXPORT_CONCURRENCY)
+export_queue_lock = threading.Lock()
+export_queue_waiting = 0
+# Spawn, not fork: the server is multi-threaded and a forked child can inherit held locks.
+export_mp = multiprocessing.get_context("spawn")
+SKIPPED_HEADER_LIMIT = 3500
+
+
+def remove_files_after_response(response, *paths):
+    def cleanup():
+        for path in paths:
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError as e:
+                    print(f"[API] Warning: could not remove {path}: {e}")
+    response.call_on_close(cleanup)
+    return response
 
 
 def read_json_body():
@@ -122,26 +147,13 @@ def dwg_to_ifc():
                 os.unlink(temp_path)
             return jsonify(result), 500
         
-        # Return IFC file and let Flask handle cleanup
-        # Note: send_file will read the file, so we can delete it after
         response = send_file(
             temp_path,
             mimetype="application/x-step",
             as_attachment=True,
             download_name="scheme_lines.ifc"
         )
-        
-        # Schedule cleanup after response is sent
-        # Flask will handle the file deletion after send_file completes
-        try:
-            if temp_path and os.path.exists(temp_path):
-                # Use a deferred cleanup - file will be deleted after response
-                import atexit
-                atexit.register(lambda: os.path.exists(temp_path) and os.unlink(temp_path))
-        except Exception as e:
-            print(f"[API] Warning: Failed to schedule cleanup: {e}")
-        
-        return response
+        return remove_files_after_response(response, temp_path)
     
     except Exception as e:
         # Clean up on exception
@@ -195,16 +207,7 @@ def create_blank_ifc():
             as_attachment=True,
             download_name="origin_reference.ifc"
         )
-        
-        # Schedule cleanup after response is sent
-        try:
-            if temp_path and os.path.exists(temp_path):
-                import atexit
-                atexit.register(lambda: os.path.exists(temp_path) and os.unlink(temp_path))
-        except Exception as e:
-            print(f"[API] Warning: Failed to schedule cleanup: {e}")
-        
-        return response
+        return remove_files_after_response(response, temp_path)
     
     except Exception as e:
         # Clean up on exception
@@ -221,11 +224,16 @@ def create_blank_ifc():
 
 def update_progress(export_id, progress_data):
     """Update progress for an export"""
+    now = time.time()
     with export_lock:
         export_progress[export_id] = {
             **progress_data,
-            "timestamp": time.time()
+            "timestamp": now
         }
+        if len(export_progress) > 200:
+            stale = [key for key, value in export_progress.items() if now - value.get("timestamp", 0) > 3 * 3600]
+            for key in stale:
+                del export_progress[key]
 
 @app.route("/api/export-progress/<export_id>", methods=["GET"])
 def get_export_progress(export_id):
@@ -290,201 +298,179 @@ def get_export_progress(export_id):
 
 @app.route("/api/export-chambers", methods=["POST"])
 def export_chambers():
-    """Export chambers, pipes, cable trays, hangers, public lights, light connections, roads, and hardstandings to IFC file.
-    
-    Expected JSON payload:
-    {
-        "exportId": "optional-export-id",  // If provided, progress will be tracked
-        "chambers": [...],
-        "pipes": [...],
-        "cableTrays": [...],
-        "hangers": [...],
-        "publicLights": [...],
-        "lightConnections": [...],
-        "roads": [...],
-        "hardstandings": [...],
-        "project": {
-            "name": "Project Name",
-            "origin": {"x": 0, "y": 0, "z": 0},
-            "unit": "meters"
-        }
-    }
-    
-    Returns:
-        IFC file as binary download
-    """
-    temp_path = None
-    export_id = None
-    try:
-        # The app sends the id as a header too, so progress can start before the
-        # (possibly very large) body is decompressed and parsed.
-        header_export_id = request.headers.get("X-Export-Id")
-        if header_export_id:
-            update_progress(header_export_id, {
-                "type": "progress",
-                "message": "Reading export payload...",
-                "progress": 2,
-            })
+    """Export chambers, pipes, roads, drainage, site meshes and the rest to one IFC file.
 
-        data = read_json_body()
-        
-        if not data:
-            return jsonify({"success": False, "error": "No JSON data provided"}), 400
-        
-        # Get or generate export ID for progress tracking
-        export_id = data.get("exportId") or header_export_id or str(uuid.uuid4())
-        
-        chambers = data.get("chambers", [])
-        pipes = data.get("pipes", [])
-        cable_trays = data.get("cableTrays", [])
-        hangers = data.get("hangers", [])
-        public_lights = data.get("publicLights", [])
-        light_connections = data.get("lightConnections", [])
-        roads = data.get("roads", [])
-        hardstandings = data.get("hardstandings", [])
-        drainage_elements = data.get("drainageElements", [])
-        retaining_walls = data.get("retainingWalls", [])
-        site_mesh_elements = data.get("siteMeshElements", [])
-        watermain_fittings = data.get("watermainFittings", [])
-        project = data.get("project", {})
-        coordinate_mode = data.get("coordinateMode", "absolute")
-        
-        total_items = len(chambers) + len(pipes) + len(cable_trays) + len(hangers) + len(public_lights) + len(light_connections) + len(roads) + len(hardstandings) + len(drainage_elements) + len(retaining_walls) + len(site_mesh_elements) + len(watermain_fittings)
-        
-        # Initialize progress
-        update_progress(export_id, {
-            "type": "start",
-            "message": "Starting export...",
-            "total": total_items,
-            "current": 0,
-            "progress": 0
-        })
-        
-        print("=" * 70)
-        print(f"[API] Export request received (ID: {export_id})")
-        print(f"[API] Exporting {len(chambers)} chambers, {len(pipes)} pipes, {len(cable_trays)} cable trays, {len(hangers)} hangers, {len(public_lights)} public lights, {len(light_connections)} light connections, {len(roads)} roads, {len(hardstandings)} hardstandings, {len(drainage_elements)} drainage elements, {len(retaining_walls)} retaining walls, {len(site_mesh_elements)} site mesh elements, {len(watermain_fittings)} watermain fittings")
-        print("=" * 70)
-        sys.stdout.flush()
-        
-        # Create temporary file for IFC output
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".ifc")
-        os.close(temp_fd)
-        
+    The body is the app's export payload (JSON, usually gzip'd). The build runs
+    in a child process (scripts/export_worker.py); this thread only stores the
+    upload, waits for a free slot, relays progress and streams the result.
+
+    Response headers:
+        X-Export-Skipped-Count / X-Export-Skipped: elements left out because
+        they could not be built (the rest of the model is still exported).
+        X-Export-Timing: seconds spent receiving, queued, building.
+    """
+    global export_queue_waiting
+    input_path = None
+    output_path = None
+    gz_path = None
+    export_id = request.headers.get("X-Export-Id") or str(uuid.uuid4())
+    started = time.time()
+    try:
         update_progress(export_id, {
             "type": "progress",
-            "message": "Creating IFC file...",
-            "progress": 5
+            "message": "Reading export payload...",
+            "progress": 2,
         })
-        
-        # Create progress callback
-        current_step = 0
-        def progress_callback(step, current, total, message):
-            nonlocal current_step
-            current_step = current
-            progress_pct = int(5 + (current / total) * 90) if total > 0 else 5
+
+        input_fd, input_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(input_fd, "wb") as fh:
+            shutil.copyfileobj(request.stream, fh, 1024 * 1024)
+        received_bytes = os.path.getsize(input_path)
+        if received_bytes == 0:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+        received_at = time.time()
+        print(f"[API] Export {export_id}: received {received_bytes / 1e6:.1f} MB in {received_at - started:.1f}s")
+        sys.stdout.flush()
+
+        with export_queue_lock:
+            export_queue_waiting += 1
+            ahead = export_queue_waiting - 1
+        try:
+            while not export_slots.acquire(timeout=2):
+                with export_queue_lock:
+                    ahead = max(export_queue_waiting - 1, 1)
+                update_progress(export_id, {
+                    "type": "progress",
+                    "step": "queued",
+                    "message": f"Waiting for {ahead} other export(s) to finish...",
+                    "progress": 3,
+                })
+        finally:
+            with export_queue_lock:
+                export_queue_waiting -= 1
+
+        try:
+            slot_at = time.time()
+            output_fd, output_path = tempfile.mkstemp(suffix=".ifc")
+            os.close(output_fd)
+
             update_progress(export_id, {
                 "type": "progress",
-                "step": step,
-                "message": message,
-                "current": current,
-                "total": total,
-                "progress": progress_pct
+                "message": "Creating IFC file...",
+                "progress": 5,
             })
-        
-        # Export to IFC
-        result = export_chambers_to_ifc(
-            chambers,
-            temp_path,
-            project,
-            pipes,
-            cable_trays,
-            hangers,
-            public_lights_data=public_lights,
-            light_connections_data=light_connections,
-            roads_data=roads,
-            hardstandings_data=hardstandings,
-            drainage_elements_data=drainage_elements,
-            retaining_walls_data=retaining_walls,
-            site_mesh_elements_data=site_mesh_elements,
-            coordinate_mode=coordinate_mode,
-            progress_callback=progress_callback,
-            watermain_fittings_data=watermain_fittings,
-        )
-        
+
+            parent_conn, child_conn = export_mp.Pipe(duplex=False)
+            proc = export_mp.Process(
+                target=export_worker.run_export,
+                args=(input_path, output_path, child_conn),
+                daemon=True,
+            )
+            proc.start()
+            child_conn.close()
+
+            result = None
+            while result is None:
+                if parent_conn.poll(1.0):
+                    try:
+                        message = parent_conn.recv()
+                    except EOFError:
+                        break
+                    if message[0] == "progress":
+                        _, step, current, total, text = message
+                        update_progress(export_id, {
+                            "type": "progress",
+                            "step": step,
+                            "message": text,
+                            "current": current,
+                            "total": total,
+                            "progress": int(5 + (current / total) * 90) if total else 5,
+                        })
+                    elif message[0] == "result":
+                        result = message[1]
+                elif not proc.is_alive():
+                    break
+            proc.join(timeout=30)
+            if proc.is_alive():
+                proc.kill()
+            parent_conn.close()
+        finally:
+            export_slots.release()
+
+        built_at = time.time()
+        timing = f"receive={received_at - started:.1f};queue={slot_at - received_at:.1f};build={built_at - slot_at:.1f}"
+        print(f"[API] Export {export_id}: {timing} exit={proc.exitcode}")
+        sys.stdout.flush()
+
+        if result is None:
+            if proc.exitcode is not None and proc.exitcode < 0:
+                error = (
+                    f"The IFC build process was stopped by the server (signal {-proc.exitcode}), "
+                    "usually because it ran out of memory. Export the model in smaller parts."
+                )
+            else:
+                error = f"The IFC build process ended without a result (exit code {proc.exitcode})."
+            result = {"success": False, "error": error}
+
         if not result.get("success"):
-            # Clean up on error
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
             update_progress(export_id, {
                 "type": "error",
                 "message": result.get("error", "Export failed"),
-                "progress": 0
+                "progress": 0,
             })
             return jsonify(result), 500
-        
-        update_progress(export_id, {
-            "type": "progress",
-            "message": "Finalizing IFC file...",
-            "progress": 95
-        })
-        
-        # Mark as preparing download
-        update_progress(export_id, {
-            "type": "progress",
-            "message": "Preparing download...",
-            "progress": 98,
-            "current": total_items,
-            "total": total_items
-        })
-        
-        # Return IFC file
-        response = send_file(
-            temp_path,
-            mimetype="application/x-step",
-            as_attachment=True,
-            download_name="export.ifc"
-        )
-        # Add custom header to response
+
+        gz_path = result.get("gzipPath")
+        accepts_gzip = "gzip" in (request.headers.get("Accept-Encoding") or "").lower()
+        if gz_path and accepts_gzip and os.path.exists(gz_path):
+            response = send_file(gz_path, mimetype="application/x-step", as_attachment=True, download_name="export.ifc")
+            response.headers["Content-Encoding"] = "gzip"
+            response.headers["Vary"] = "Accept-Encoding"
+        else:
+            response = send_file(output_path, mimetype="application/x-step", as_attachment=True, download_name="export.ifc")
+
+        skipped = result.get("skipped") or []
         response.headers["X-Export-Id"] = export_id
-        
-        # Mark as complete (download will start shortly)
+        response.headers["X-Export-Timing"] = timing
+        response.headers["X-Export-Skipped-Count"] = str(len(skipped))
+        if skipped:
+            listed = []
+            for item in skipped:
+                listed.append({"kind": item.get("kind"), "name": item.get("name")})
+                if len(json.dumps(listed, ensure_ascii=True)) > SKIPPED_HEADER_LIMIT:
+                    listed.pop()
+                    break
+            response.headers["X-Export-Skipped"] = json.dumps(listed, ensure_ascii=True)
+
         update_progress(export_id, {
             "type": "complete",
             "message": "Download starting...",
             "progress": 100,
-            "current": total_items,
-            "total": total_items
         })
-        
-        # Schedule cleanup after response is sent
-        try:
-            if temp_path and os.path.exists(temp_path):
-                import atexit
-                atexit.register(lambda: os.path.exists(temp_path) and os.unlink(temp_path))
-        except Exception as e:
-            print(f"[API] Warning: Failed to schedule cleanup: {e}")
-        
-        return response
-    
+        return remove_files_after_response(response, output_path, gz_path)
+
     except Exception as e:
-        # Clean up on exception
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-        
-        if export_id:
-            update_progress(export_id, {
-                "type": "error",
-                "message": str(e),
-                "progress": 0
-            })
-        
+        for path in (input_path, output_path, gz_path):
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        update_progress(export_id, {
+            "type": "error",
+            "message": str(e),
+            "progress": 0,
+        })
         print(f"[API] Error in export-chambers endpoint: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if input_path and os.path.exists(input_path):
+            try:
+                os.unlink(input_path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5001))

@@ -1327,6 +1327,22 @@ def create_lid_representation(
     return solids
 
 
+def chamber_ifc_plan_angle(chamber_data):
+    """
+    Counter-clockwise IFC angle (from +X east) that puts the chamber's local Y
+    (length) axis on the plan direction the app sent.
+
+    Payloads with ``mirrorPlan`` carry the survey bearing of the length axis,
+    clockwise from north: atan2(dEasting, dNorthing). Older payloads carry the
+    Three.js scene yaw, whose northing runs the other way. The plan footprint is
+    symmetric about both local axes, so a mirrored width axis needs no reflection.
+    """
+    rotation = float(chamber_data.get("rotation", 0.0) or 0.0)
+    if "mirrorPlan" in chamber_data:
+        return -rotation
+    return rotation + math.pi
+
+
 def add_chamber_to_ifc(
     ifc_file,
     storey,
@@ -1403,9 +1419,8 @@ def add_chamber_to_ifc(
         predefined_type="USERDEFINED",
     )
 
-    # Rotation is sent in RADIANS from frontend (stored as radians in Chamber interface)
-    rotation_radians = chamber_data.get("rotation", 0.0) or 0.0
-    log(f"[CHAMBER]   Rotation: {rotation_radians} radians ({math.degrees(rotation_radians):.2f}°)")
+    rotation_radians = chamber_ifc_plan_angle(chamber_data)
+    log(f"[CHAMBER]   Rotation: {chamber_data.get('rotation', 0.0)} rad sent, IFC plan angle {math.degrees(rotation_radians):.2f}°")
 
     # Convert Y-up (Three.js) to Z-up (IFC/Revit)
     # Use ABSOLUTE world coordinates directly
@@ -6609,6 +6624,23 @@ def export_chambers_to_ifc(
         hardstandings_data: Optional list of hardstanding area dictionaries with components
     """
     ifc_file = None
+    skipped = []
+
+    def guarded_add(kind, item, name_keys, build):
+        """One bad element is logged and left out; the rest of the model still exports."""
+        try:
+            return build()
+        except Exception as e:
+            name = None
+            if isinstance(item, dict):
+                name = next((item.get(key) for key in name_keys if item.get(key)), None)
+            name = str(name or kind)
+            log(f"[EXPORT] ⚠️ Skipped {kind} '{name}': {e}")
+            import traceback
+            traceback.print_exc()
+            skipped.append({"kind": kind, "name": name, "error": str(e)})
+            return None
+
     try:
         chamber_count = len(chambers_data)
         pipe_count = len(pipes_data) if pipes_data else 0
@@ -6651,7 +6683,7 @@ def export_chambers_to_ifc(
             log(
                 f"[EXPORT] Adding chamber {index}/{chamber_count}: {chamber.get('name', chamber.get('id'))}"
             )
-            add_chamber_to_ifc(
+            guarded_add('chamber', chamber, ('name', 'id'), lambda: add_chamber_to_ifc(
                 ifc_file,
                 storey,
                 context,
@@ -6659,7 +6691,7 @@ def export_chambers_to_ifc(
                 project_coords,
                 coordinate_mode=coordinate_mode,
                 origin_tuple=origin_tuple,
-            )
+            ))
             current_item += 1
             if progress_callback:
                 progress_callback("chambers", current_item, total_items, f"Added chamber {index}/{chamber_count}")
@@ -6673,7 +6705,7 @@ def export_chambers_to_ifc(
         if pipes_data:
             for index, pipe in enumerate(pipes_data, start=1):
                 log(f"[EXPORT] Adding pipe {index}/{pipe_count}: {pipe.get('pipeId', 'Pipe')}")
-                result = add_pipe_to_ifc(
+                result = guarded_add('pipe', pipe, ('pipeId',), lambda: add_pipe_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6681,7 +6713,7 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
-                )
+                ))
                 if result:
                     pipes_created += 1
                     if pipe.get('isBend', False):
@@ -6707,7 +6739,7 @@ def export_chambers_to_ifc(
                 log(
                     f"[EXPORT] Adding cable tray {index}/{tray_count}: {tray.get('trayId', 'CableTray')}"
                 )
-                add_cable_tray_to_ifc(
+                guarded_add('cable tray', tray, ('trayId',), lambda: add_cable_tray_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6715,7 +6747,7 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
-                )
+                ))
                 current_item += 1
                 if progress_callback:
                     progress_callback("cable_trays", current_item, total_items, f"Added cable tray {index}/{tray_count}")
@@ -6726,7 +6758,7 @@ def export_chambers_to_ifc(
                 log(
                     f"[EXPORT] Adding hanger {index}/{hanger_count}: {hanger.get('hangerId', 'Hanger')}"
                 )
-                add_hanger_to_ifc(
+                guarded_add('hanger', hanger, ('hangerId',), lambda: add_hanger_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6734,7 +6766,7 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
-                )
+                ))
                 current_item += 1
                 if progress_callback:
                     progress_callback("hangers", current_item, total_items, f"Added hanger {index}/{hanger_count}")
@@ -6750,7 +6782,7 @@ def export_chambers_to_ifc(
                 log(
                     f"[EXPORT] Adding public {type_label} {index}/{public_light_count}: {light_ref}"
                 )
-                result = add_public_light_to_ifc(
+                result = guarded_add('light', light, ('referenceId', 'id'), lambda: add_public_light_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6758,7 +6790,7 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
-                )
+                ))
                 if result:
                     if element_type == 'sign':
                         signs_created += 1
@@ -6781,7 +6813,7 @@ def export_chambers_to_ifc(
                 log(
                     f"[EXPORT] Adding light connection {index}/{light_connection_count}: {connection.get('connectionId', 'LightConnection')}"
                 )
-                result = add_light_connection_to_ifc(
+                result = guarded_add('light connection', connection, ('connectionId',), lambda: add_light_connection_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6789,7 +6821,7 @@ def export_chambers_to_ifc(
                     project_coords,
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
-                )
+                ))
                 if result:
                     light_connections_created += 1
                 current_item += 1
@@ -6830,7 +6862,7 @@ def export_chambers_to_ifc(
                             f"Road {index}/{road_count}: {comp_message} ({comp_idx}/{comp_total} components)"
                         )
                 
-                result = add_road_to_ifc(
+                result = guarded_add('road', road, ('name', 'roadId'), lambda: add_road_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6839,7 +6871,7 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                     progress_callback=road_progress_callback if progress_callback else None,
-                )
+                ))
                 if result:
                     roads_created += 1
                     road_components_created += len(result)
@@ -6874,7 +6906,7 @@ def export_chambers_to_ifc(
                             f"Hardstanding {index}/{hardstanding_count}: {comp_message} ({comp_idx}/{comp_total} components)",
                         )
 
-                result = add_hardstanding_to_ifc(
+                result = guarded_add('hardstanding', hardstanding, ('name', 'areaId'), lambda: add_hardstanding_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6883,7 +6915,7 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                     progress_callback=hardstanding_progress_callback if progress_callback else None,
-                )
+                ))
                 if result:
                     hardstandings_created += 1
                     hardstanding_components_created += len(result)
@@ -6924,7 +6956,7 @@ def export_chambers_to_ifc(
                             f"Drainage {index}/{drainage_count}: {comp_message} ({comp_idx}/{comp_total} components)",
                         )
 
-                result = add_drainage_elements_to_ifc(
+                result = guarded_add('drainage element', element, ('name', 'elementId'), lambda: add_drainage_elements_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6933,7 +6965,7 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                     progress_callback=drainage_progress_callback if progress_callback else None,
-                )
+                ))
                 if result:
                     drainage_elements_created += 1
                     drainage_components_created += len(result)
@@ -6972,7 +7004,7 @@ def export_chambers_to_ifc(
                             f"Retaining wall {index}/{retaining_wall_count}: {comp_message} ({comp_idx}/{comp_total} components)",
                         )
 
-                result = add_retaining_wall_to_ifc(
+                result = guarded_add('retaining wall', wall, ('name', 'wallId'), lambda: add_retaining_wall_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -6981,7 +7013,7 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                     progress_callback=wall_progress_callback if progress_callback else None,
-                )
+                ))
                 if result:
                     retaining_walls_created += 1
                     retaining_wall_components_created += len(result)
@@ -7019,7 +7051,7 @@ def export_chambers_to_ifc(
                             f"Site element {index}/{site_mesh_count}: {comp_message} ({comp_idx}/{comp_total} components)",
                         )
 
-                result = add_site_mesh_element_to_ifc(
+                result = guarded_add('site element', element, ('name', 'elementId'), lambda: add_site_mesh_element_to_ifc(
                     ifc_file,
                     storey,
                     context,
@@ -7028,7 +7060,7 @@ def export_chambers_to_ifc(
                     coordinate_mode=coordinate_mode,
                     origin_tuple=origin_tuple,
                     progress_callback=site_mesh_progress_callback if progress_callback else None,
-                )
+                ))
                 if result:
                     site_mesh_created += 1
                     site_mesh_components_created += len(result)
@@ -7069,6 +7101,11 @@ def export_chambers_to_ifc(
                     log(f"[EXPORT] ❌ Watermain fitting {index} failed: {e}")
                     import traceback
                     traceback.print_exc()
+                    skipped.append({
+                        "kind": "watermain fitting",
+                        "name": str(fitting.get("fittingId") or f"fitting {index}"),
+                        "error": str(e),
+                    })
                     element, ports = None, []
                 if element is not None:
                     watermain_fittings_created += 1
@@ -7098,10 +7135,13 @@ def export_chambers_to_ifc(
         ifc_file.write(output_path)
         if progress_callback:
             progress_callback("complete", total_items, total_items, "Export complete!")
+        if skipped:
+            log(f"[EXPORT] ⚠️ {len(skipped)} element(s) skipped: " + ", ".join(f"{s['kind']} {s['name']}" for s in skipped[:20]))
         log("[EXPORT] ✅ Export complete!")
 
         return {
             "success": True,
+            "skipped": skipped,
             "file": output_path,
             "chambers_count": chamber_count,
             "pipes_count": pipe_count,
