@@ -415,6 +415,60 @@ def add_custom_property_set(ifc_file, element, pset_name, properties):
     return pset
 
 
+def ifc_design_status(item):
+    """IFC Status enum value for a payload item. Missing or unknown means proposed (NEW)."""
+    if isinstance(item, dict) and str(item.get("designStatus") or "").lower() == "existing":
+        return "EXISTING"
+    return "NEW"
+
+
+def max_entity_id(ifc_file):
+    try:
+        return int(ifc_file.wrapped_data.getMaxId())
+    except Exception:
+        return max((entity.id() for entity in ifc_file), default=0)
+
+
+def _common_pset_of(element):
+    for rel in getattr(element, "IsDefinedBy", None) or []:
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        definition = rel.RelatingPropertyDefinition
+        if definition and definition.is_a("IfcPropertySet"):
+            name = definition.Name or ""
+            if name.startswith("Pset_") and name.endswith("Common"):
+                return definition
+    return None
+
+
+def apply_design_status(ifc_file, since_id, status):
+    """
+    Write Status (NEW / EXISTING) on every element created after since_id.
+    Status goes on the element's standard Pset_*Common when it has one,
+    otherwise on a new Pset_<Class>Common, as IFC checkers expect.
+    """
+    tagged = 0
+    created = []
+    # Walk only the new ids so a large export stays linear.
+    for entity_id in range(since_id + 1, max_entity_id(ifc_file) + 1):
+        try:
+            entity = ifc_file.by_id(entity_id)
+        except Exception:
+            continue
+        if entity is not None and entity.is_a("IfcElement"):
+            created.append(entity)
+    for element in created:
+        pset = _common_pset_of(element)
+        value = ifc_file.createIfcLabel(status)
+        if pset is not None:
+            existing = [p for p in (pset.HasProperties or []) if getattr(p, "Name", None) != "Status"]
+            pset.HasProperties = existing + [ifc_file.createIfcPropertySingleValue("Status", None, value, None)]
+        else:
+            add_custom_property_set(ifc_file, element, f"Pset_{element.is_a()[3:]}Common", {"Status": status})
+        tagged += 1
+    return tagged
+
+
 def determine_length_unit_settings(project_coords):
     unit_label = (project_coords or {}).get("unit", "meters")
     return UNIT_MAPPING.get(str(unit_label).lower(), UNIT_MAPPING["meters"])
@@ -6628,7 +6682,13 @@ def export_chambers_to_ifc(
     def guarded_add(kind, item, name_keys, build):
         """One bad element is logged and left out; the rest of the model still exports."""
         try:
-            return build()
+            since_id = max_entity_id(ifc_file)
+            result = build()
+            try:
+                apply_design_status(ifc_file, since_id, ifc_design_status(item))
+            except Exception as status_error:
+                log(f"[EXPORT] ⚠️ Status not written for {kind}: {status_error}")
+            return result
         except Exception as e:
             name = None
             if isinstance(item, dict):
@@ -7087,6 +7147,7 @@ def export_chambers_to_ifc(
             port_registry = {}
             for index, fitting in enumerate(watermain_fittings_data, start=1):
                 try:
+                    since_id = max_entity_id(ifc_file)
                     element, ports = add_watermain_fitting_to_ifc(
                         ifc_file,
                         storey,
@@ -7096,6 +7157,7 @@ def export_chambers_to_ifc(
                         coordinate_mode=coordinate_mode,
                         origin_tuple=origin_tuple,
                     )
+                    apply_design_status(ifc_file, since_id, ifc_design_status(fitting))
                 except Exception as e:
                     log(f"[EXPORT] ❌ Watermain fitting {index} failed: {e}")
                     import traceback
